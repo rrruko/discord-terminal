@@ -22,15 +22,24 @@ library
   -- other-modules:
   -- other-extensions:
   build-depends:       base >=4.12 && <4.13
+                     , discord-haskell
   hs-source-dirs:      src
   default-language:    Haskell2010
 
-executable discord-terminal
+executable discord-terminal-exe
   main-is:             Main.hs
   -- other-modules:
   -- other-extensions:
-  build-depends:       base >=4.12 && <4.13, discord-terminal
+  build-depends:       base >=4.12 && <4.13
+                     , containers
+                     , discord-terminal
+                     , discord-haskell
+                     , reflex
+                     , reflex-vty
+                     , vty
+                     , text
   hs-source-dirs:      app
+  ghc-options:         -threaded
   default-language:    Haskell2010
 
 test-suite discord-terminal-test
