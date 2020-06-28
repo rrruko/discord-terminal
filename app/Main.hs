@@ -16,6 +16,7 @@ import Data.Bifunctor
 import Data.Bitraversable
 import qualified Data.Set as Set
 import Data.Text (Text, intercalate, isPrefixOf, unlines, pack, toLower)
+import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.Text.Zipper
 import Discord
@@ -60,7 +61,7 @@ sendMessageWidget = do
   send <- key V.KEnter
   textInp <- textInput (def { _textInputConfig_modify = const empty <$ send })
   let userInput = current (textInp & _textInput_value) `tag` send
-  history <- foldDyn (:) ["some stuff"] userInput
+  history <- foldDyn (:) (fmap T.singleton ['a'..'z']) userInput
   pure history
 
 channelView :: (MonadVtyApp t m, MonadNodeId m) => VtyWidget t m ()
@@ -68,12 +69,50 @@ channelView = mdo
   (_, history) <- splitV
     (pure (subtract 1))
     (pure (False, True))
-    (scrollableText
-      (1 <$ updated history)
-      (current $ Data.Text.unlines . reverse <$> history))
+    (do
+      sizePane history $
+        scrollableText'
+          (1 <$ updated history)
+          (Data.Text.unlines . reverse <$> history)
+      pure ())
     sendMessageWidget
   pure ()
+  where
+    sizePane history widget = snd <$>
+      splitV
+        (fmap (\h x -> max 0 (x - length h)) history)
+        (pure (True, True))
+        blank
+        widget
 
+scrollableText'
+  :: forall t m. (MonadVtyApp t m, MonadNodeId m)
+  => ReflexEvent t Int -> Dynamic t Text -> VtyWidget t m ()
+scrollableText' scrollBy contents = do
+  dw <- displayWidth
+  dh <- displayHeight
+  let imgs = wrap <$> dw <*> contents
+  kup <- key V.KUp
+  kdown <- key V.KDown
+  m <- mouseScroll
+  let requestedScroll :: ReflexEvent t Int
+      requestedScroll = leftmost
+        [ 1 <$ kdown
+        , (-1) <$ kup
+        , ffor m $ \case
+            ScrollDirection_Up -> (-1)
+            ScrollDirection_Down -> 1
+        , scrollBy
+        ]
+      updateLine maxN delta ix h = min (max 0 (ix + delta)) (maxN - h)
+  lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine (maxN - 1) delta ix h) 0 $
+    attachPromptlyDyn dh $ attachPromptlyDyn (length <$> imgs) requestedScroll
+  tellImages $ fmap ((:[]) . V.vertCat) $ current $ drop <$> lineIndex <*> imgs
+  pure ()
+  where
+    wrap maxWidth =
+      concatMap (fmap (V.string V.defAttr . T.unpack) . wrapWithOffset maxWidth 0) .
+      T.split (=='\n')
 
   {-
     DiscordEvents discordEvent discordStartEvent <- setupDiscord token
