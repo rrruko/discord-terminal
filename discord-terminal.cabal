@@ -34,8 +34,9 @@ executable discord-terminal-exe
                      , containers
                      , discord-terminal
                      , discord-haskell
+                     , lens
                      , reflex
-                     , reflex-vty
+                     , reflex-vty >= 0.1.4.0
                      , vty
                      , text
   hs-source-dirs:      app
