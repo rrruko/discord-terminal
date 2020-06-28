@@ -87,7 +87,8 @@ channelView = mdo
 
 scrollableText'
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
-  => ReflexEvent t Int -> Dynamic t Text -> VtyWidget t m ()
+  => ReflexEvent t Int -> Dynamic t Text
+  -> VtyWidget t m (Behavior t (Int, Int))
 scrollableText' scrollBy contents = do
   dw <- displayWidth
   dh <- displayHeight
@@ -108,7 +109,7 @@ scrollableText' scrollBy contents = do
   lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine (maxN - 1) delta ix h) 0 $
     attachPromptlyDyn dh $ attachPromptlyDyn (length <$> imgs) requestedScroll
   tellImages $ fmap ((:[]) . V.vertCat) $ current $ drop <$> lineIndex <*> imgs
-  pure ()
+  pure $ (,) <$> ((+) <$> current lineIndex <*> pure 1) <*> (length <$> current imgs)
   where
     wrap maxWidth =
       concatMap (fmap (V.string V.defAttr . T.unpack) . wrapWithOffset maxWidth 0) .
