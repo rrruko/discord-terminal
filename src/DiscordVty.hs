@@ -78,81 +78,55 @@ channelView = mdo
     (pure (False, True))
     (do
       display ((("    " <>) . show) <$> progressB)
-      sizePane history $
-        scrollableText'
-          (1 <$ updated history)
-          (Data.Text.intercalate "\n" . fmap (Data.Text.pack . show) . reverse <$> history))
+      scrollableText'
+        (1 <$ updated history)
+        (fmap (Data.Text.pack . show) . reverse <$> history))
     sendMessageWidget
   pure ()
-  where
-    sizePane history widget = snd <$>
-      splitV
-        (fmap (\h x -> max 0 (x - length h)) history)
-        (pure (True, True))
-        blank
-        widget
 
 scrollableText'
-  :: forall t m. (MonadHold t m, MonadFix m, Reflex t)
-  => ReflexEvent t Int -> Dynamic t Text
+  :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
+  => ReflexEvent t Int -> Dynamic t [Text]
   -> VtyWidget t m (Behavior t (Int, Int, Int))
 scrollableText' scrollBy contents = do
-  dw <- displayWidth
-  dh <- displayHeight
-  let imgs = wrap <$> dw <*> contents
-  kup <- key V.KUp
-  kdown <- key V.KDown
-  m <- mouseScroll
-  let requestedScroll :: ReflexEvent t Int
-      requestedScroll = leftmost
-        [ 1 <$ kdown
-        , (-1) <$ kup
-        , ffor m $ \case
-            ScrollDirection_Up -> (-1)
-            ScrollDirection_Down -> 1
-        , scrollBy
-        ]
-      updateLine maxN delta ix h = min (max 0 (ix + delta)) (maxN - h)
-  lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
-    attachPromptlyDyn dh $ attachPromptlyDyn (length <$> imgs) requestedScroll
-  tellImages $ fmap ((:[]) . V.vertCat) $ current $ drop <$> lineIndex <*> imgs
-  pure $ (,,)
-    <$> ((+) <$> current lineIndex <*> pure 1)
-    <*> ((+) <$> current lineIndex <*> current dh)
-    <*> (length <$> current imgs)
+  f <- focus
+  aw <- displayWidth
+  ah <- displayHeight
+  pane (widgetRegion aw ah) f w
   where
+    w = do
+      dw <- displayWidth
+      dh <- displayHeight
+      let imgs = wrap <$> dw <*> (T.intercalate "\n" <$> contents)
+      kup <- key V.KUp
+      kdown <- key V.KDown
+      m <- mouseScroll
+      let requestedScroll :: ReflexEvent t Int
+          requestedScroll = leftmost
+            [ 1 <$ kdown
+            , (-1) <$ kup
+            , ffor m $ \case
+                ScrollDirection_Up -> (-1)
+                ScrollDirection_Down -> 1
+            , scrollBy
+            ]
+          updateLine maxN delta ix h = max 0 (min (maxN - h) (ix + delta))
+      lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
+        attachPromptlyDyn dh $ attachPromptlyDyn (length <$> imgs) requestedScroll
+      tellImages $ fmap ((:[]) . V.vertCat) $ current $ drop <$> lineIndex <*> imgs
+      pure $ (,,)
+        <$> ((+) <$> current lineIndex <*> pure 1)
+        <*> ((+) <$> current lineIndex <*> current dh)
+        <*> (length <$> current imgs)
     wrap maxWidth =
       concatMap (fmap (V.string V.defAttr . T.unpack) . wrapWithOffset maxWidth 0) .
       T.split (=='\n')
-
-testScrollableText'
-  :: (t ~ Pure Int, MonadHold t m, MonadFix m)
-  => ReflexEvent t VtyEvent
-  -> m (Behavior t (Int, Int, Int), Behavior t [V.Image])
-testScrollableText' inp = do
-  runVtyWidget' ctx $
-    (scrollableText' @(Pure Int) never (pure ("A\nB\nC\nD\nE" :: T.Text)))
-  where
-    ctx = VtyWidgetCtx
-      (constDyn 3)
-      (constDyn 3)
-      (constDyn True)
-      inp
-
-testScrollableText''
-  :: (t ~ Pure Int)
-  => Int
-  -> (Behavior t (Int, Int, Int), Behavior t [V.Image])
-testScrollableText'' =
-  testScrollableText'
-    (Event $ \t -> Just $ V.EvKey V.KDown [])
-
-runVtyWidget'
-  :: (Monad m, Reflex t)
-  => VtyWidgetCtx t
-  -> VtyWidget t m a
-  -> m (a, Behavior t [V.Image])
-runVtyWidget' ctx w = runReaderT (runBehaviorWriterT (unVtyWidget w)) ctx
+    widgetRegion aw ah =
+      DynRegion
+        (constDyn 0)
+        ((\x y -> max 0 (x - y)) <$> ah <*> fmap length contents)
+        aw
+        (min <$> fmap length contents <*> ah)
 
   {-
     DiscordEvents discordEvent discordStartEvent <- setupDiscord token
