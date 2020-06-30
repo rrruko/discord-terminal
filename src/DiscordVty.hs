@@ -20,6 +20,10 @@ import Control.Monad.IO.Class
 import Control.Monad.Reader
 import Data.Bifunctor
 import Data.Bitraversable
+import Data.Bool
+import Data.Foldable
+import qualified Data.Map as Map
+import Data.Monoid
 import qualified Data.Set as Set
 import Data.Text (Text, intercalate, isPrefixOf, unlines, pack, toLower)
 import qualified Data.Text as T
@@ -40,6 +44,26 @@ data Dir = Up | Down
 type ReflexEvent = Reflex.Vty.Event
 type DiscordEvent = Discord.Types.Event
 
+data AppState = AppState
+  { guilds :: Map.Map GuildId GuildState
+  } deriving (Show)
+
+data GuildState = GuildState
+  { guildName :: Text
+  , channels :: Map.Map ChannelId ChannelState
+  } deriving (Show)
+
+data ChannelState = ChannelState
+  { channelName' :: Text
+  , messages :: [AppMessage]
+  } deriving (Show)
+
+data AppMessage = AppMessage
+  { author :: Text
+  , contents :: Text
+  , timestamp :: UTCTime
+  } deriving (Show)
+
 app :: IO ()
 app =
   getArgs >>= \case
@@ -54,35 +78,98 @@ runClient token = mainWidget widget
     inp <- input
     tog <- toggle True =<< tabNavigation
     let foc = fmap (\b -> if b then (True, False) else (False, True)) tog
-    splitH
-      (pure (subtract 12))
-      foc
-      (boxTitle (constant def) " Server view " channelView)
-      (boxTitle (constant def) " Servers " blank)
+    let guilds = Map.fromList $
+          zip [0..] (["Server A", "Server B", "Server C"] :: [Text])
+    mdo
+      ((), currentGuildId) <- splitH
+        (pure (subtract 12))
+        foc
+        (boxTitle (constant def) " Server view " (channelView chanState))
+        (boxTitle (constant def) " Servers " (serversView guilds))
+      let chanState = currentGuildId <&> (>>= (fakeServer Map.!?))
+      pure ()
     pure $ fforMaybe inp $ \case
       V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
       _ -> Nothing
+  fakeServer :: Map.Map ChannelId ChannelState
+  fakeServer = Map.fromList
+    [ (0, ChannelState "Channel 1" $
+        [ AppMessage "buko" "hey" epochTime
+        , AppMessage "buko" "wat up lol" epochTime
+        , AppMessage "cardenas69" "can't talk right now... im draining" epochTime
+        ])
+    , (1, ChannelState "Channel 2" $
+        [ AppMessage "eratosthenes" (T.concat $ replicate 100 "what's up gamers, ") epochTime
+        ])
+    ]
 
-sendMessageWidget :: (MonadVtyApp t m, MonadNodeId m) => VtyWidget t m (Dynamic t [Text])
+serversView
+  :: forall t m. (MonadVtyApp t m, MonadNodeId m)
+  => Map.Map GuildId Text
+  -> VtyWidget t m (Dynamic t (Maybe GuildId))
+serversView guildsMap = do
+  inp <- input <&> ffilter (\x -> x == V.EvKey V.KEnter [])
+  selectedGuildIx <- foldDyn (\_ acc -> mod (acc + 1) (length guildsMap)) 0 inp
+  let selectedGuild = selectedGuildIx <&> (\ix -> elemAt' ix guildsMap)
+  runLayout
+    (constDyn Orientation_Column)
+    0
+    (1 <$ inp)
+    serversList
+  display (current $ fmap (fmap fst) selectedGuild)
+  pure (fmap (fmap fst) selectedGuild)
+  where
+  normal = V.defAttr
+  highlighted = V.withStyle V.defAttr V.standout
+  highlight isFocused =
+    RichTextConfig (current isFocused <&> bool normal highlighted)
+  serversList = mdo
+    forM (Map.toList guildsMap) \(id, name) -> do
+      fixed 1 $ do
+        f <- focus
+        richText (highlight f) (pure name)
+  elemAt' n m =
+    let
+      rest = snd (Map.splitAt n m)
+    in
+      if length rest > 0
+        then Just (Map.elemAt 0 rest)
+        else Nothing
+
+sendMessageWidget :: (MonadVtyApp t m, MonadNodeId m) => VtyWidget t m (ReflexEvent t Text)
 sendMessageWidget = do
   send <- key V.KEnter
   textInp <- textInput (def { _textInputConfig_modify = const empty <$ send })
   let userInput = current (textInp & _textInput_value) `tag` send
-  history <- foldDyn (:) (fmap T.singleton ['a'..'z']) userInput
-  pure history
+  pure userInput
 
-channelView :: (MonadVtyApp t m, MonadNodeId m) => VtyWidget t m ()
-channelView = mdo
-  (progressB, history) <- splitV
+channelView
+  :: (MonadVtyApp t m, MonadNodeId m)
+  => Dynamic t (Maybe ChannelState)
+  -> VtyWidget t m ()
+channelView chanState = mdo
+  (progressB, userSend) <- splitV
     (pure (subtract 1))
     (pure (False, True))
     (do
       display ((("    " <>) . show) <$> progressB)
       scrollableText'
-        (1 <$ updated history)
-        (fmap (Data.Text.pack . show) . reverse <$> history))
+        (1 <$ updated chanState)
+        (csToLines <$> chanState))
     sendMessageWidget
   pure ()
+  where
+    csToLines :: Maybe ChannelState -> [Text]
+    csToLines (Just m) = fmap prettyMessage (messages m)
+    csToLines Nothing = ["Failed to get channel state"]
+    prettyMessage :: AppMessage -> Text
+    prettyMessage msg =
+      T.pack (show (timestamp msg)) <>
+      "\n" <>
+      author msg <>
+      ": " <>
+      contents msg <>
+      "\n"
 
 scrollableText'
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
@@ -92,7 +179,9 @@ scrollableText' scrollBy contents = do
   f <- focus
   aw <- displayWidth
   ah <- displayHeight
-  pane (widgetRegion aw ah) f w
+  mdo
+    result <- pane (widgetRegion aw ah (snd result)) f w
+    pure (fst result)
   where
     w = do
       dw <- displayWidth
@@ -114,19 +203,20 @@ scrollableText' scrollBy contents = do
       lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
         attachPromptlyDyn dh $ attachPromptlyDyn (length <$> imgs) requestedScroll
       tellImages $ fmap ((:[]) . V.vertCat) $ current $ drop <$> lineIndex <*> imgs
-      pure $ (,,)
-        <$> ((+) <$> current lineIndex <*> pure 1)
-        <*> ((+) <$> current lineIndex <*> current dh)
-        <*> (length <$> current imgs)
+      let result = (,,)
+            <$> ((+) <$> current lineIndex <*> pure 1)
+            <*> ((+) <$> current lineIndex <*> current dh)
+            <*> (length <$> current imgs)
+      pure (result, length <$> imgs)
     wrap maxWidth =
       concatMap (fmap (V.string V.defAttr . T.unpack) . wrapWithOffset maxWidth 0) .
       T.split (=='\n')
-    widgetRegion aw ah =
+    widgetRegion aw ah widgetResult =
       DynRegion
         (constDyn 0)
-        ((\x y -> max 0 (x - y)) <$> ah <*> fmap length contents)
+        ((\x y -> max 0 (x - y)) <$> ah <*> widgetResult)
         aw
-        (min <$> fmap length contents <*> ah)
+        (min <$> widgetResult <*> ah)
 
   {-
     DiscordEvents discordEvent discordStartEvent <- setupDiscord token
