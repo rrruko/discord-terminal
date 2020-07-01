@@ -7,31 +7,35 @@ import Test.Hspec
 
 import qualified DiscordVty (scrollableText')
 
+import Control.Monad.Identity
+import Unsafe.Coerce
 import Control.Monad.Fix
 import Control.Monad.Reader
+import Control.Monad.State.Strict
 import Reflex
+import Reflex.Class
 import Reflex.Pure
 import Reflex.Vty
 import qualified Graphics.Vty as V
 import qualified Data.Text as T
 
-runVtyWidgetPure
+runWidgetPure
   :: (t ~ Pure Int)
   => VtyWidgetCtx t
-  -> VtyWidget t ((->) Int) a
-  -> Int -> (a, Behavior t [V.Image])
-runVtyWidgetPure ctx w = runReaderT (runBehaviorWriterT (unVtyWidget w)) ctx
+  -> VtyWidget t (StateT Integer ((->) Int)) a
+  -> a
+runWidgetPure ctx = fst . fst . ($ 0) . flip runStateT 0 . runVtyWidget ctx
 
--- Hack to allow pure evaluation of reflex-vty widgets.
--- getNextNodeId is rarely actually invoked but the constraint occurs
--- on many functions in reflex-vty. It should be possible to define
--- a pure StateT-based implementation instead of just failing like this.
-instance MonadNodeId ((->) a) where
-  getNextNodeId = error "MonadNodeId ((->) a): Unimplemented"
+-- unsafeCoerce is used here because NodeId
+-- does not export its constructor
+instance (m ~ ((->) a), s ~ Integer) => MonadNodeId (StateT s m) where
+  getNextNodeId = do
+    newId <- get
+    modify (+1)
+    pure (unsafeCoerce newId)
 
 spec :: SpecWith ()
 spec = do
-
   describe "scrollableText'" $ do
     it "stays within bounds" $ do
       let
@@ -44,14 +48,14 @@ spec = do
             (constDyn True)
             inp
         widget windowHeight =
-          runVtyWidgetPure
+          runWidgetPure
             (vtyCtx windowHeight)
             (DiscordVty.scrollableText' never widgetContents)
-      unBehavior (fst $ widget 3 0) 0 `shouldBe` (1,3,5)
-      unBehavior (fst $ widget 3 0) 1 `shouldBe` (2,4,5)
-      unBehavior (fst $ widget 3 0) 2 `shouldBe` (3,5,5)
-      unBehavior (fst $ widget 3 0) 100 `shouldBe` (3,5,5)
-      unBehavior (fst $ widget 100 0) 0 `shouldBe` (1,5,5)
+      unBehavior (widget 3) 0 `shouldBe` (1,3,5)
+      unBehavior (widget 3) 1 `shouldBe` (2,4,5)
+      unBehavior (widget 3) 2 `shouldBe` (3,5,5)
+      unBehavior (widget 3) 100 `shouldBe` (3,5,5)
+      unBehavior (widget 100) 0 `shouldBe` (1,5,5)
 
 main :: IO ()
 main = hspec spec
