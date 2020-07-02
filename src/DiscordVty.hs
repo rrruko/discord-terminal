@@ -9,6 +9,7 @@
 
 module DiscordVty
   ( app
+  , channelView
   , scrollableText'
   ) where
 
@@ -81,7 +82,7 @@ runClient token = mainWidget widget
     let guilds = Map.fromList $
           zip [0..] (["Server A", "Server B", "Server C"] :: [Text])
     mdo
-      ((), currentGuildId) <- splitH
+      (_, currentGuildId) <- splitH
         (pure (subtract 12))
         foc
         (boxTitle (constant def) " Server view " (channelView chanState))
@@ -136,7 +137,9 @@ serversView guildsMap = do
         then Just (Map.elemAt 0 rest)
         else Nothing
 
-sendMessageWidget :: (MonadVtyApp t m, MonadNodeId m) => VtyWidget t m (ReflexEvent t Text)
+sendMessageWidget
+  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
+  => VtyWidget t m (ReflexEvent t Text)
 sendMessageWidget = do
   send <- key V.KEnter
   textInp <- textInput (def { _textInputConfig_modify = const empty <$ send })
@@ -144,9 +147,9 @@ sendMessageWidget = do
   pure userInput
 
 channelView
-  :: (MonadVtyApp t m, MonadNodeId m)
+  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
   => Dynamic t (Maybe ChannelState)
-  -> VtyWidget t m ()
+  -> VtyWidget t m (ReflexEvent t Text)
 channelView chanState = mdo
   (progressB, userSend) <- splitV
     (pure (subtract 1))
@@ -157,7 +160,7 @@ channelView chanState = mdo
         (1 <$ updated chanState)
         (csToLines <$> chanState))
     sendMessageWidget
-  pure ()
+  pure userSend
   where
     csToLines :: Maybe ChannelState -> [Text]
     csToLines (Just m) = fmap prettyMessage (messages m)
@@ -248,14 +251,6 @@ scrollableText' scrollBy contents = do
       V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
       _ -> Nothing
   -}
-
-channelsView
-  :: (MonadVtyApp t m, MonadNodeId m)
-  => Dynamic t [(PartialGuild, [Channel])]
-  -> VtyWidget t m (ReflexEvent t ())
-channelsView allChannels = do
-  inp <- keyPressed V.KEnter <$> input
-  pure never
 
 keyPressed
   :: (Reflex t)
