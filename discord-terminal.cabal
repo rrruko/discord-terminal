@@ -48,6 +48,7 @@ test-suite discord-terminal-test
   type:                exitcode-stdio-1.0
   build-depends:       hspec
                      , containers
+                     , discord-haskell
                      , discord-terminal
                      , lens
                      , mtl
