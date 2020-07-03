@@ -44,7 +44,7 @@ defaultCtx = VtyWidgetCtx
 
 spec :: SpecWith ()
 spec = do
-  describe "scrollableText'" $ do
+  describe "scrollableTextWindowed" $ do
     it "stays within bounds" $ do
       let
         inp = Event $ \t -> Just (V.EvKey V.KDown [])
@@ -56,7 +56,7 @@ spec = do
         widget windowHeight =
           runWidgetPure
             (vtyCtx windowHeight)
-            (DiscordVty.scrollableText' never widgetContents)
+            (DiscordVty.scrollableTextWindowed never widgetContents)
       unBehavior (widget 3) 0 `shouldBe` (1,3,5)
       unBehavior (widget 3) 1 `shouldBe` (2,4,5)
       unBehavior (widget 3) 2 `shouldBe` (3,5,5)
