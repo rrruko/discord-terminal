@@ -6,6 +6,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE RankNTypes #-}
 
 module DiscordVty
   ( app
@@ -72,26 +73,17 @@ app =
     _ -> putStrLn "No token supplied."
 
 runClient :: Text -> IO ()
-runClient token = mainWidget widget
+runClient token = mainWidget do
+  tog <- toggle True =<< tabNavigation
+  let foc = fmap (bool (False, True) (True, False)) tog
+  let guilds = Map.fromList $
+        zip [0..] ["Server A", "Server B", "Server C"]
+  serverWidget foc guilds fakeServer sendUserMessage
+  inp <- input
+  pure $ fforMaybe inp $ \case
+    V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
+    _ -> Nothing
   where
-  widget :: (MonadVtyApp t m, MonadNodeId m) => VtyWidget t m (ReflexEvent t ())
-  widget = do
-    inp <- input
-    tog <- toggle True =<< tabNavigation
-    let foc = fmap (\b -> if b then (True, False) else (False, True)) tog
-    let guilds = Map.fromList $
-          zip [0..] (["Server A", "Server B", "Server C"] :: [Text])
-    mdo
-      (_, currentGuildId) <- splitH
-        (pure (subtract 12))
-        foc
-        (boxTitle (constant def) " Server view " (channelView chanState))
-        (boxTitle (constant def) " Servers " (serversView guilds))
-      let chanState = currentGuildId <&> (>>= (fakeServer Map.!?))
-      pure ()
-    pure $ fforMaybe inp $ \case
-      V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
-      _ -> Nothing
   fakeServer :: Map.Map ChannelId ChannelState
   fakeServer = Map.fromList
     [ (0, ChannelState "Channel 1" $
@@ -103,6 +95,24 @@ runClient token = mainWidget widget
         [ AppMessage "eratosthenes" (T.concat $ replicate 100 "what's up gamers, ") epochTime
         ])
     ]
+  sendUserMessage :: MonadIO m => Text -> m ()
+  sendUserMessage text = pure ()
+
+serverWidget
+  :: (MonadVtyApp t m, MonadNodeId m)
+  => Dynamic t (Bool, Bool)
+  -> Map.Map GuildId Text
+  -> Map.Map ChannelId ChannelState
+  -> (Text -> ReaderT (VtyWidgetCtx t) (Performable m) ())
+  -> VtyWidget t m ()
+serverWidget foc guilds server sendUserMessage = mdo
+  (userSend, currentGuildId) <- splitH
+    (pure (subtract 12))
+    foc
+    (boxTitle (constant def) " Server view " (channelView chanState))
+    (boxTitle (constant def) " Servers " (serversView guilds))
+  let chanState = currentGuildId <&> (>>= (server Map.!?))
+  performEvent_ (fmap sendUserMessage userSend)
 
 serversView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
