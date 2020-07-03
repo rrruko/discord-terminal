@@ -6,11 +6,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE RankNTypes #-}
 
 module DiscordVty
   ( app
   , channelView
-  , scrollableText'
+  , scrollableTextWindowed
   ) where
 
 import Control.Concurrent (forkIO, threadDelay)
@@ -40,19 +41,7 @@ import Reflex.Vty
 import Reflex.Vty.Widget
 import System.Environment
 
-data Dir = Up | Down
-
 type ReflexEvent = Reflex.Vty.Event
-type DiscordEvent = Discord.Types.Event
-
-data AppState = AppState
-  { guilds :: Map.Map GuildId GuildState
-  } deriving (Show)
-
-data GuildState = GuildState
-  { guildName :: Text
-  , channels :: Map.Map ChannelId ChannelState
-  } deriving (Show)
 
 data ChannelState = ChannelState
   { channelName' :: Text
@@ -72,26 +61,17 @@ app =
     _ -> putStrLn "No token supplied."
 
 runClient :: Text -> IO ()
-runClient token = mainWidget widget
+runClient token = mainWidget do
+  tog <- toggle True =<< tabNavigation
+  let foc = fmap (bool (False, True) (True, False)) tog
+  let guilds = Map.fromList $
+        zip [0..] ["Server A", "Server B", "Server C"]
+  serverWidget foc guilds fakeServer sendUserMessage
+  inp <- input
+  pure $ fforMaybe inp $ \case
+    V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
+    _ -> Nothing
   where
-  widget :: (MonadVtyApp t m, MonadNodeId m) => VtyWidget t m (ReflexEvent t ())
-  widget = do
-    inp <- input
-    tog <- toggle True =<< tabNavigation
-    let foc = fmap (\b -> if b then (True, False) else (False, True)) tog
-    let guilds = Map.fromList $
-          zip [0..] (["Server A", "Server B", "Server C"] :: [Text])
-    mdo
-      (_, currentGuildId) <- splitH
-        (pure (subtract 12))
-        foc
-        (boxTitle (constant def) " Server view " (channelView chanState))
-        (boxTitle (constant def) " Servers " (serversView guilds))
-      let chanState = currentGuildId <&> (>>= (fakeServer Map.!?))
-      pure ()
-    pure $ fforMaybe inp $ \case
-      V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
-      _ -> Nothing
   fakeServer :: Map.Map ChannelId ChannelState
   fakeServer = Map.fromList
     [ (0, ChannelState "Channel 1" $
@@ -103,13 +83,31 @@ runClient token = mainWidget widget
         [ AppMessage "eratosthenes" (T.concat $ replicate 100 "what's up gamers, ") epochTime
         ])
     ]
+  sendUserMessage :: MonadIO m => Text -> m ()
+  sendUserMessage text = pure ()
+
+serverWidget
+  :: (MonadVtyApp t m, MonadNodeId m)
+  => Dynamic t (Bool, Bool)
+  -> Map.Map GuildId Text
+  -> Map.Map ChannelId ChannelState
+  -> (Text -> ReaderT (VtyWidgetCtx t) (Performable m) ())
+  -> VtyWidget t m ()
+serverWidget foc guilds server sendUserMessage = mdo
+  (userSend, currentGuildId) <- splitH
+    (pure (subtract 12))
+    foc
+    (boxTitle (constant def) " Server view " (channelView chanState))
+    (boxTitle (constant def) " Servers " (serversView guilds))
+  let chanState = currentGuildId <&> (>>= (server Map.!?))
+  performEvent_ (fmap sendUserMessage userSend)
 
 serversView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
   => Map.Map GuildId Text
   -> VtyWidget t m (Dynamic t (Maybe GuildId))
 serversView guildsMap = do
-  inp <- input <&> ffilter (\x -> x == V.EvKey V.KEnter [])
+  inp <- input <&> ffilter (== V.EvKey V.KEnter [])
   selectedGuildIx <- foldDyn (\_ acc -> mod (acc + 1) (length guildsMap)) 0 inp
   let selectedGuild = selectedGuildIx <&> (\ix -> elemAt' ix guildsMap)
   runLayout
@@ -156,7 +154,7 @@ channelView chanState = mdo
     (pure (False, True))
     (do
       display ((("    " <>) . show) <$> progressB)
-      scrollableText'
+      scrollableTextWindowed
         (1 <$ updated chanState)
         (csToLines <$> chanState))
     sendMessageWidget
@@ -174,183 +172,57 @@ channelView chanState = mdo
       contents msg <>
       "\n"
 
-scrollableText'
+scrollableTextWindowed
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
   => ReflexEvent t Int -> Dynamic t [Text]
   -> VtyWidget t m (Behavior t (Int, Int, Int))
-scrollableText' scrollBy contents = do
+scrollableTextWindowed scrollBy contents = mdo
   f <- focus
   aw <- displayWidth
   ah <- displayHeight
-  mdo
-    result <- pane (widgetRegion aw ah (snd result)) f w
-    pure (fst result)
+  result <- pane
+    (widgetRegion aw ah (snd result))
+    f
+    (scrollableText' scrollBy contents)
+  pure (fst result)
   where
-    w = do
-      dw <- displayWidth
-      dh <- displayHeight
-      let imgs = wrap <$> dw <*> (T.intercalate "\n" <$> contents)
-      kup <- key V.KUp
-      kdown <- key V.KDown
-      m <- mouseScroll
-      let requestedScroll :: ReflexEvent t Int
-          requestedScroll = leftmost
-            [ 1 <$ kdown
-            , (-1) <$ kup
-            , ffor m $ \case
-                ScrollDirection_Up -> (-1)
-                ScrollDirection_Down -> 1
-            , scrollBy
-            ]
-          updateLine maxN delta ix h = max 0 (min (maxN - h) (ix + delta))
-      lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
-        attachPromptlyDyn dh $ attachPromptlyDyn (length <$> imgs) requestedScroll
-      tellImages $ fmap ((:[]) . V.vertCat) $ current $ drop <$> lineIndex <*> imgs
-      let result = (,,)
-            <$> ((+) <$> current lineIndex <*> pure 1)
-            <*> ((+) <$> current lineIndex <*> current dh)
-            <*> (length <$> current imgs)
-      pure (result, length <$> imgs)
-    wrap maxWidth =
-      concatMap (fmap (V.string V.defAttr . T.unpack) . wrapWithOffset maxWidth 0) .
-      T.split (=='\n')
-    widgetRegion aw ah widgetResult =
-      DynRegion
-        (constDyn 0)
-        ((\x y -> max 0 (x - y)) <$> ah <*> widgetResult)
-        aw
-        (min <$> widgetResult <*> ah)
+  widgetRegion aw ah widgetResult =
+    DynRegion
+      (constDyn 0)
+      ((\x y -> max 0 (x - y)) <$> ah <*> widgetResult)
+      aw
+      (min <$> widgetResult <*> ah)
 
-  {-
-    DiscordEvents discordEvent discordStartEvent <- setupDiscord token
-    inp <- input
-    currentGuilds <- holdDyn Nothing
-      (fmapMaybe (Just . getGuildsEvent) discordStartEvent)
-    handle <- holdDyn Nothing
-      (fmapMaybe (Just . getHandleEvent) discordStartEvent)
-    let
-      choice = fforMaybe inp $ \case
-        V.EvKey (V.KLeft) [] -> Just Up
-        V.EvKey (V.KRight) [] -> Just Down
-        _ -> Nothing
-    focusedGuild <-
-      foldDyn
-        (\(guilds, dir) (guildIx, guild) -> do
-          let ix = case dir of
-                Up -> mod (guildIx + 1) (length guilds)
-                Down -> mod (guildIx - 1) (length guilds)
-          (ix, guilds !! ix))
-        (0, Nothing)
-        (attachPromptlyDyn currentGuilds choice)
-    let
-      handleWithGuild = fmapMaybe (\(x, y) -> (\z -> (z,y)) <$> x) $
-        attachPromptlyDyn handle (fmapMaybe id (updated focusedGuild))
-    statuses <- performEventAsync (uncurry getGuildChannels <$> handleWithGuild)
-    display =<< hold [] statuses
-    pure $ fforMaybe inp $ \case
-      V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
-      _ -> Nothing
-  -}
-
-keyPressed
-  :: (Reflex t)
-  => V.Key -> ReflexEvent t VtyEvent -> ReflexEvent t ()
-keyPressed k ev = fforMaybe ev $ \case
-  V.EvKey key _ | key == k -> Just ()
-  _ -> Nothing
-
-handleDiscordEvent
-  :: MonadIO m
-  => DiscordHandle -> DiscordEvent -> (() -> IO ()) -> m ()
-handleDiscordEvent handle ev callback = do
-  pure ()
-
-handleOnStartEvent
-  :: MonadIO m
-  => DiscordHandle -> (DiscordStartEvent -> IO ()) -> m ()
-handleOnStartEvent handle callback = liftIO $ do
-  callback (DiscordHandleEvent handle)
-  restCall handle R.GetCurrentUserGuilds >>= \case
-    Left errCode -> pure ()
-    Right guilds -> callback (DiscordGuildsEvent guilds)
-
-type TriggerDiscordEvent = (DiscordHandle, Discord.Types.Event) -> IO ()
-type OnStartEvent = DiscordHandle -> IO ()
-
-spawnDiscord
-  :: MonadIO m
-  => Text -> TriggerDiscordEvent -> OnStartEvent -> (Text -> IO ()) -> m ()
-spawnDiscord botToken triggerDiscordEvent onStartEvent callback =
-  liftIO $ void $ forkIO $ do
-    err <- runDiscord $ def
-             { discordToken = botToken
-             , discordOnEvent = curry triggerDiscordEvent
-             , discordOnStart = onStartEvent
-             }
-    callback err
-
-data DiscordStartEvent
-  = DiscordHandleEvent DiscordHandle
-  | DiscordGuildsEvent [PartialGuild]
-
-getHandleEvent :: DiscordStartEvent -> Maybe DiscordHandle
-getHandleEvent = \case
-  DiscordHandleEvent h -> Just h
-  _ -> Nothing
-
-getGuildsEvent :: DiscordStartEvent -> Maybe [PartialGuild]
-getGuildsEvent = \case
-  DiscordGuildsEvent g -> Just g
-  _ -> Nothing
-
-data DiscordEvents t = DiscordEvents
-  { event :: ReflexEvent t ()
-  , startEvent :: ReflexEvent t DiscordStartEvent
-  }
-
-setupDiscord
-  :: (MonadVtyApp t m, MonadNodeId m)
-  => Text
-  -> VtyWidget t m (DiscordEvents t)
-setupDiscord token = do
-  (discordEvent, triggerDiscordEvent) <- newTriggerEvent
-  (discordStartEvent, onStartEvent) <- newTriggerEvent
-  start <- getPostBuild
-  performEventAsync
-    (spawnDiscord token triggerDiscordEvent onStartEvent <$ start)
-  ev <- performEventAsync (fmap (uncurry handleDiscordEvent) discordEvent)
-  startEv <- performEventAsync (fmap handleOnStartEvent discordStartEvent)
-  pure (DiscordEvents ev startEv)
-
-getGuildChannels
-  :: MonadIO m
-  => DiscordHandle -> PartialGuild -> ([Channel] -> IO ()) -> m ()
-getGuildChannels handle guild callback = liftIO $ do
-  let command = R.GetGuildChannels (partialGuildId guild)
-  restCall handle command >>= \case
-    Left errCode -> print errCode
-    Right channels -> callback channels
-
-channelMessages
-  :: MonadIO m
-  => DiscordHandle -> Channel -> (Maybe [Text] -> IO ()) -> m ()
-channelMessages handle channel callback = liftIO $ do
-  let chanId = channelId channel
-  let command = R.GetChannelMessages chanId (5, R.LatestMessages)
-  restCall handle command >>= \case
-    Left errCode -> callback Nothing
-    Right messages -> do
-      callback (Just (fmap messageText messages))
-
-channelNamePretty :: Channel -> Text
-channelNamePretty c = case c of
-  ChannelText {} ->
-    channelName c
-  ChannelVoice {} ->
-    channelName c
-  ChannelDirectMessage {} ->
-    intercalate ", " (fmap userName $ channelRecipients c)
-  ChannelGroupDM {} ->
-    intercalate ", " (fmap userName $ channelRecipients c)
-  ChannelGuildCategory {} ->
-    "<Category>"
+scrollableText'
+  :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
+  => ReflexEvent t Int -> Dynamic t [Text]
+  -> VtyWidget t m (Behavior t (Int, Int, Int), Dynamic t Int)
+scrollableText' scrollBy contents = do
+  dw <- displayWidth
+  dh <- displayHeight
+  let imgs = wrap <$> dw <*> (T.intercalate "\n" <$> contents)
+  kup <- key V.KUp
+  kdown <- key V.KDown
+  m <- mouseScroll
+  let requestedScroll :: ReflexEvent t Int
+      requestedScroll = leftmost
+        [ 1 <$ kdown
+        , (-1) <$ kup
+        , ffor m $ \case
+            ScrollDirection_Up -> (-1)
+            ScrollDirection_Down -> 1
+        , scrollBy
+        ]
+      updateLine maxN delta ix h = max 0 (min (maxN - h) (ix + delta))
+  lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
+    attachPromptlyDyn dh $ attachPromptlyDyn (length <$> imgs) requestedScroll
+  tellImages $ fmap ((:[]) . V.vertCat) $ current $ drop <$> lineIndex <*> imgs
+  let result = (,,)
+        <$> ((+) <$> current lineIndex <*> pure 1)
+        <*> ((+) <$> current lineIndex <*> current dh)
+        <*> (length <$> current imgs)
+  pure (result, length <$> imgs)
+  where
+  wrap maxWidth =
+    concatMap (fmap (V.string V.defAttr . T.unpack) . wrapWithOffset maxWidth 0) .
+    T.split (=='\n')
