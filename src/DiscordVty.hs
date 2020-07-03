@@ -37,6 +37,7 @@ import Discord.Types
 import qualified Graphics.Vty as V
 import Reflex
 import Reflex.Pure
+import Reflex.Network
 import Reflex.Vty
 import Reflex.Vty.Widget
 import System.Environment
@@ -66,7 +67,7 @@ runClient token = mainWidget do
   let foc = fmap (bool (False, True) (True, False)) tog
   let guilds = Map.fromList $
         zip [0..] ["Server A", "Server B", "Server C"]
-  serverWidget foc guilds fakeServer sendUserMessage
+  serverWidget foc (pure guilds) (pure fakeServer) sendUserMessage
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -89,8 +90,8 @@ runClient token = mainWidget do
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
   => Dynamic t (Bool, Bool)
-  -> Map.Map GuildId Text
-  -> Map.Map ChannelId ChannelState
+  -> Dynamic t (Map.Map GuildId Text)
+  -> Dynamic t (Map.Map ChannelId ChannelState)
   -> (Text -> ReaderT (VtyWidgetCtx t) (Performable m) ())
   -> VtyWidget t m ()
 serverWidget foc guilds server sendUserMessage = mdo
@@ -99,22 +100,24 @@ serverWidget foc guilds server sendUserMessage = mdo
     foc
     (boxTitle (constant def) " Server view " (channelView chanState))
     (boxTitle (constant def) " Servers " (serversView guilds))
-  let chanState = currentGuildId <&> (>>= (server Map.!?))
+  let chanState = (\s ident -> ident >>= (s Map.!?)) <$> server <*> currentGuildId
   performEvent_ (fmap sendUserMessage userSend)
 
 serversView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
-  => Map.Map GuildId Text
+  => Dynamic t (Map.Map GuildId Text)
   -> VtyWidget t m (Dynamic t (Maybe GuildId))
 serversView guildsMap = do
   inp <- input <&> ffilter (== V.EvKey V.KEnter [])
-  selectedGuildIx <- foldDyn (\_ acc -> mod (acc + 1) (length guildsMap)) 0 inp
-  let selectedGuild = selectedGuildIx <&> (\ix -> elemAt' ix guildsMap)
-  runLayout
-    (constDyn Orientation_Column)
-    0
-    (1 <$ inp)
-    serversList
+  selectedGuildIx <-
+    foldDyn (\l acc -> mod (acc + 1) l) 0 (current (fmap length guildsMap) <@ inp)
+  let selectedGuild = elemAt' <$> selectedGuildIx <*> guildsMap
+  networkView $
+    runLayout
+      (constDyn Orientation_Column)
+      0
+      (1 <$ inp)
+      <$> serversList
   display (current $ fmap (fmap fst) selectedGuild)
   pure (fmap (fmap fst) selectedGuild)
   where
@@ -122,8 +125,9 @@ serversView guildsMap = do
   highlighted = V.withStyle V.defAttr V.standout
   highlight isFocused =
     RichTextConfig (current isFocused <&> bool normal highlighted)
-  serversList = mdo
-    forM (Map.toList guildsMap) \(id, name) -> do
+  serversList :: Dynamic t (Layout t m [()])
+  serversList =
+    guildsMap <&> \gm -> forM (Map.toList gm) \(id, name) -> do
       fixed 1 $ do
         f <- focus
         richText (highlight f) (pure name)
