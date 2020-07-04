@@ -100,8 +100,8 @@ runClient token = mainWidget mdo
     ((\h -> performEventAsync (fmap (uncurry (requestChannelMessages h)) reqChannelMessages))
       <$> handleAvailable)
   let appStateUpdates = fmap updateMessages newMessages
-  appStateUpdatesDyn <- holdDyn id appStateUpdates
-  let updatedAppState = appStateUpdatesDyn <*> guilds
+  updatedAppStateDyn <- foldDyn (\x acc -> x . acc) id appStateUpdates
+  let updatedAppState = updatedAppStateDyn <*> guilds
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -109,8 +109,6 @@ runClient token = mainWidget mdo
   where
   sendUserMessage :: MonadIO m => Text -> m ()
   sendUserMessage text = pure ()
-
--- Event (a -> a) -> Dynamic a -> Dynamic a
 
 updateMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
 updateMessages (gId, cId, msg) appState =
@@ -265,14 +263,11 @@ serverWidget foc guilds sendUserMessage = mdo
           (boxTitle (constant def) " Channels "
             (channelsView (fmap (fmap DiscordVty._channels) currentGuild))))
 
-  let initGuildId = guilds <&> (First . fmap fst . elemAt' 0 . _guildsMap)
-  updatedGuildId <- fmap First <$> foldDyn (\x acc -> Just x) Nothing newGuildId
-  let currentGuildId = getFirst <$> mconcat
-        [ updatedGuildId, initGuildId ]
-  let initChanId = currentGuild <&> (First . fmap fst . (>>= elemAt' 0 . DiscordVty._channels))
-  updatedChanId <- fmap First <$> foldDyn (\x acc -> Just x) Nothing newChanId
-  let currentChanId = getFirst <$> mconcat
-        [ updatedChanId, initChanId ]
+  (currentGuildId, currentChanId) <- accumulateGuildChannel
+    currentGuild
+    newGuildId
+    newChanId
+    guilds
   let currentGuild = (\g gId -> gId >>= \i -> (_guildsMap g) Map.!? i) <$> guilds <*> currentGuildId
 
   let chanState = (\s gId cId -> getChannelState s gId cId)
@@ -285,6 +280,24 @@ serverWidget foc guilds sendUserMessage = mdo
         chanState
   let updatedGuildChanId = (,,) <$> currentGuildId <*> currentChanId <*> isLoaded
   pure (fforMaybe (updated updatedGuildChanId) (\(a,b,c) -> (,,) <$> a <*> b <*> Just c))
+
+accumulateGuildChannel
+  :: (Reflex t, MonadHold t m, MonadFix m)
+  => Dynamic t (Maybe GuildState)
+  -> ReflexEvent t GuildId
+  -> ReflexEvent t ChannelId
+  -> Dynamic t AppState
+  -> m (Dynamic t (Maybe GuildId), Dynamic t (Maybe ChannelId))
+accumulateGuildChannel currentGuild newGuildId newChanId guilds = do
+  --let initGuildId = guilds <&> (fmap fst . elemAt' 0 . _guildsMap)
+  updatedGuildId <- foldDyn (\x acc -> Just x) Nothing newGuildId
+  let currentGuildId = getFirst <$> mconcat
+        (fmap (fmap First) [ updatedGuildId])
+  --let initChanId = currentGuild <&> (fmap fst . (>>= elemAt' 0 . DiscordVty._channels))
+  updatedChanId <- foldDyn (\x acc -> Just x) Nothing newChanId
+  let currentChanId = getFirst <$> mconcat
+        (fmap (fmap First) [ updatedChanId])
+  pure (currentGuildId, currentChanId)
 
 elemAt' :: Int -> Map.Map a b -> Maybe (a, b)
 elemAt' n m =
