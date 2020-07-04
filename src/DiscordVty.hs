@@ -55,6 +55,15 @@ data AppMessage = AppMessage
   , timestamp :: UTCTime
   } deriving (Show)
 
+data GuildState = GuildState
+  { guildName' :: Text
+  , channels :: Map.Map ChannelId ChannelState
+  }
+
+data AppState = AppState
+  { guildsMap :: Map.Map GuildId GuildState
+  }
+
 app :: IO ()
 app =
   getArgs >>= \case
@@ -65,72 +74,96 @@ runClient :: Text -> IO ()
 runClient token = mainWidget do
   tog <- toggle True =<< tabNavigation
   let foc = fmap (bool (False, True) (True, False)) tog
-  let guilds = Map.fromList $
-        zip [0..] ["Server A", "Server B", "Server C"]
-  serverWidget foc (pure guilds) (pure fakeServer) sendUserMessage
+  let guilds = AppState (Map.fromList
+        [ (0, GuildState "guild1" (Map.fromList
+            [ (0, ChannelState "chan1" [AppMessage "buko" "chan1 message" epochTime])
+            , (1, ChannelState "chan2" [AppMessage "buko" "chan2 message" epochTime])
+            ]))
+        , (1, GuildState "guild2" (Map.fromList
+            [ (0, ChannelState "chan3" [AppMessage "buko" "chan3 message" epochTime])
+            , (1, ChannelState "chan4" [AppMessage "buko" "chan4 message" epochTime])
+            ]))
+        ])
+  serverWidget foc (pure guilds) sendUserMessage
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
     _ -> Nothing
   where
-  fakeServer :: Map.Map ChannelId ChannelState
-  fakeServer = Map.fromList
-    [ (0, ChannelState "Channel 1" $
-        [ AppMessage "buko" "hey" epochTime
-        , AppMessage "buko" "wat up lol" epochTime
-        , AppMessage "cardenas69" "can't talk right now... im draining" epochTime
-        ])
-    , (1, ChannelState "Channel 2" $
-        [ AppMessage "eratosthenes" (T.concat $ replicate 100 "what's up gamers, ") epochTime
-        ])
-    ]
   sendUserMessage :: MonadIO m => Text -> m ()
   sendUserMessage text = pure ()
 
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
   => Dynamic t (Bool, Bool)
-  -> Dynamic t (Map.Map GuildId Text)
-  -> Dynamic t (Map.Map ChannelId ChannelState)
+  -> Dynamic t AppState
   -> (Text -> ReaderT (VtyWidgetCtx t) (Performable m) ())
   -> VtyWidget t m ()
-serverWidget foc guilds server sendUserMessage = mdo
-  (userSend, currentGuildId) <- splitH
-    (pure (subtract 12))
-    foc
-    (boxTitle (constant def) " Server view " (channelView chanState))
-    (boxTitle (constant def) " Servers " (serversView guilds))
-  let chanState = (\s ident -> ident >>= (s Map.!?)) <$> server <*> currentGuildId
+serverWidget foc guilds sendUserMessage = mdo
+  (currentGuildId, (userSend, currentChanId)) <-
+    splitV (pure (const 1)) (pure (True, True))
+      (serversView (fmap guildsMap guilds))
+      (splitH
+          (pure (subtract 12))
+          foc
+          (boxTitle (constant def) " Server view "
+            (channelView chanState))
+          (boxTitle (constant def) " Servers "
+            (channelsView (fmap (fmap channels) currentGuild))))
+  let currentGuild = (\g gId -> gId >>= \i -> (guildsMap g) Map.!? i) <$> guilds <*> currentGuildId
+  let chanState = (\s (gId, cId) -> getChannelState s gId cId)
+        <$> (fmap guildsMap guilds)
+        <*> currentChanId
   performEvent_ (fmap sendUserMessage userSend)
+
+getChannelState s gId cId = do
+  g <- gId
+  c <- cId
+  currGuild <- s Map.!? g
+  channels currGuild Map.!? c
 
 serversView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
-  => Dynamic t (Map.Map GuildId Text)
+  => Dynamic t (Map.Map GuildId GuildState)
   -> VtyWidget t m (Dynamic t (Maybe GuildId))
-serversView guildsMap = do
-  inp <- input <&> ffilter (== V.EvKey V.KEnter [])
-  selectedGuildIx <-
-    foldDyn (\l acc -> mod (acc + 1) l) 0 (current (fmap length guildsMap) <@ inp)
-  let selectedGuild = elemAt' <$> selectedGuildIx <*> guildsMap
+serversView guilds = do
+  e <- networkView $ guilds <&> \gs ->
+    row $ fmap (fmap getFirst . mconcat) $ forM (Map.toList gs) $ \(gId, guild) -> do
+      stretch $ do
+        f <- focus
+        display (pure (guildName' guild))
+        pure (bool (First Nothing) (First $ Just gId) <$> f)
+  d <- holdDyn (constDyn Nothing) e
+  pure (join d)
+
+channelsView
+  :: forall t m. (MonadVtyApp t m, MonadNodeId m)
+  => Dynamic t (Maybe (Map.Map ChannelId ChannelState))
+  -> VtyWidget t m (Dynamic t (Maybe GuildId, Maybe ChannelId))
+channelsView channels = do
+  inp <- input
   networkView $
     runLayout
       (constDyn Orientation_Column)
       0
       (1 <$ inp)
-      <$> serversList
-  display (current $ fmap (fmap fst) selectedGuild)
-  pure (fmap (fmap fst) selectedGuild)
+      <$> (channelsList channels)
+  pure (pure (Just 0, Just 0))
   where
   normal = V.defAttr
   highlighted = V.withStyle V.defAttr V.standout
   highlight isFocused =
     RichTextConfig (current isFocused <&> bool normal highlighted)
-  serversList :: Dynamic t (Layout t m [()])
-  serversList =
-    guildsMap <&> \gm -> forM (Map.toList gm) \(id, name) -> do
-      fixed 1 $ do
-        f <- focus
-        richText (highlight f) (pure name)
+  channelsList chans =
+    chans <&> \chs ->
+      case chs of
+        Nothing -> pure [()]
+        Just c -> forM (Map.toList c) \(id, chan) -> do
+          fixed 1 $ do
+            inp <- input
+            f <- focus
+            richText (highlight f) (pure (channelName' chan))
+          pure ()
   elemAt' n m =
     let
       rest = snd (Map.splitAt n m)
