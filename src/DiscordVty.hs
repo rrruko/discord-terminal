@@ -47,7 +47,7 @@ type DiscordEvent = Discord.Types.Event
 
 data ChannelState = ChannelState
   { channelName' :: Text
-  , messages :: [AppMessage]
+  , messages :: Lazy [AppMessage]
   } deriving (Show)
 
 data AppMessage = AppMessage
@@ -65,6 +65,11 @@ data AppState = AppState
   { guildsMap :: Map.Map GuildId GuildState
   }
 
+data Lazy a
+  = NotLoaded
+  | Loaded a
+  deriving (Eq, Ord, Show)
+
 app :: IO ()
 app =
   getArgs >>= \case
@@ -76,9 +81,18 @@ runClient token = mainWidget do
   DiscordEvents discordEvent discordStartEvent <- setupDiscord token
   guilds <- holdDyn (AppState mempty)
     (fmapMaybe getGuildsEvent discordStartEvent)
+  handle <- holdDyn Nothing
+    (fmapMaybe (Just . getHandleEvent) discordStartEvent)
   tog <- toggle True =<< tabNavigation
   let foc = fmap (bool (False, True) (True, False)) tog
-  serverWidget foc guilds sendUserMessage
+  currChanId <- serverWidget foc guilds sendUserMessage
+  reqChannelMessages <- debounce 0.5 currChanId
+    <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
+  let handleAvailable = fmapMaybe id (updated handle)
+  newMessages <- switchDyn <$> networkHold
+    (pure never)
+    ((\h -> performEventAsync (fmap (uncurry (requestChannelMessages h)) reqChannelMessages))
+      <$> handleAvailable)
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -86,6 +100,18 @@ runClient token = mainWidget do
   where
   sendUserMessage :: MonadIO m => Text -> m ()
   sendUserMessage text = pure ()
+
+requestChannelMessages
+  :: MonadIO m
+  => DiscordHandle
+  -> GuildId
+  -> ChannelId
+  -> ([Message] -> IO ())
+  -> m ()
+requestChannelMessages handle gId cId callback = liftIO $
+  restCall handle (R.GetChannelMessages cId (10, R.LatestMessages)) >>= \case
+    Left errCode -> pure ()
+    Right msgs -> callback msgs
 
 handleDiscordEvent
   :: MonadIO m
@@ -106,7 +132,7 @@ handleOnStartEvent handle callback = liftIO $ do
 
 toChannelMap :: [Channel] -> Map.Map ChannelId ChannelState
 toChannelMap chans = Map.fromList
-  [ (channelId c, ChannelState (channelNamePretty c) []) | c <- chans ]
+  [ (channelId c, ChannelState (channelNamePretty c) NotLoaded) | c <- chans ]
 
 getGuildsMap :: DiscordHandle -> [PartialGuild] -> IO (Map.Map GuildId GuildState)
 getGuildsMap handle guilds = do
@@ -206,7 +232,7 @@ serverWidget
   => Dynamic t (Bool, Bool)
   -> Dynamic t AppState
   -> (Text -> ReaderT (VtyWidgetCtx t) (Performable m) ())
-  -> VtyWidget t m ()
+  -> VtyWidget t m (ReflexEvent t (GuildId, ChannelId, Bool))
 serverWidget foc guilds sendUserMessage = mdo
   inp <- key V.KEsc
   tog <- toggle False inp
@@ -236,6 +262,11 @@ serverWidget foc guilds sendUserMessage = mdo
         <*> currentGuildId
         <*> currentChanId
   performEvent_ (fmap sendUserMessage userSend)
+  let isLoaded = fmap
+        (\case { Just (ChannelState _ NotLoaded) -> False; _ -> True })
+        chanState
+  let updatedGuildChanId = (,,) <$> currentGuildId <*> currentChanId <*> isLoaded
+  pure (fforMaybe (updated updatedGuildChanId) (\(a,b,c) -> (,,) <$> a <*> b <*> Just c))
 
 elemAt' :: Int -> Map.Map a b -> Maybe (a, b)
 elemAt' n m =
@@ -332,7 +363,10 @@ channelView chanState = mdo
   pure userSend
   where
     csToLines :: Maybe ChannelState -> [Text]
-    csToLines (Just m) = fmap prettyMessage (messages m)
+    csToLines (Just m) =
+      case messages m of
+        Loaded m' -> fmap prettyMessage m'
+        NotLoaded -> ["Not loaded"]
     csToLines Nothing = ["Failed to get channel state"]
     prettyMessage :: AppMessage -> Text
     prettyMessage msg =
