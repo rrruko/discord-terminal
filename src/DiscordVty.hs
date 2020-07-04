@@ -5,6 +5,7 @@
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE RankNTypes #-}
 
@@ -15,6 +16,7 @@ module DiscordVty
   ) where
 
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Lens
 import Control.Lens.Operators
 import Control.Monad (when, void)
 import Control.Monad.Fix
@@ -45,30 +47,34 @@ import System.Environment
 type ReflexEvent = Reflex.Vty.Event
 type DiscordEvent = Discord.Types.Event
 
-data ChannelState = ChannelState
-  { channelName' :: Text
-  , messages :: Lazy [AppMessage]
-  } deriving (Show)
-
-data AppMessage = AppMessage
-  { author :: Text
-  , contents :: Text
-  , timestamp :: UTCTime
-  } deriving (Show)
-
-data GuildState = GuildState
-  { guildName' :: Text
-  , channels :: Map.Map ChannelId ChannelState
-  }
-
-data AppState = AppState
-  { guildsMap :: Map.Map GuildId GuildState
-  }
-
 data Lazy a
   = NotLoaded
   | Loaded a
   deriving (Eq, Ord, Show)
+
+data AppMessage = AppMessage
+  { _author :: Text
+  , _contents :: Text
+  , _timestamp :: UTCTime
+  } deriving (Show)
+makeLenses ''AppMessage
+
+data ChannelState = ChannelState
+  { _channelName' :: Text
+  , _messages :: Lazy [AppMessage]
+  } deriving (Show)
+makeLenses ''ChannelState
+
+data GuildState = GuildState
+  { _guildName' :: Text
+  , _channels :: Map.Map ChannelId ChannelState
+  }
+makeLenses ''GuildState
+
+data AppState = AppState
+  { _guildsMap :: Map.Map GuildId GuildState
+  }
+makeLenses ''AppState
 
 app :: IO ()
 app =
@@ -77,7 +83,7 @@ app =
     _ -> putStrLn "No token supplied."
 
 runClient :: Text -> IO ()
-runClient token = mainWidget do
+runClient token = mainWidget mdo
   DiscordEvents discordEvent discordStartEvent <- setupDiscord token
   guilds <- holdDyn (AppState mempty)
     (fmapMaybe getGuildsEvent discordStartEvent)
@@ -85,7 +91,7 @@ runClient token = mainWidget do
     (fmapMaybe (Just . getHandleEvent) discordStartEvent)
   tog <- toggle True =<< tabNavigation
   let foc = fmap (bool (False, True) (True, False)) tog
-  currChanId <- serverWidget foc guilds sendUserMessage
+  currChanId <- serverWidget foc updatedAppState sendUserMessage
   reqChannelMessages <- debounce 0.5 currChanId
     <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
   let handleAvailable = fmapMaybe id (updated handle)
@@ -93,6 +99,9 @@ runClient token = mainWidget do
     (pure never)
     ((\h -> performEventAsync (fmap (uncurry (requestChannelMessages h)) reqChannelMessages))
       <$> handleAvailable)
+  let appStateUpdates = fmap updateMessages newMessages
+  appStateUpdatesDyn <- holdDyn id appStateUpdates
+  let updatedAppState = appStateUpdatesDyn <*> guilds
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -101,17 +110,26 @@ runClient token = mainWidget do
   sendUserMessage :: MonadIO m => Text -> m ()
   sendUserMessage text = pure ()
 
+-- Event (a -> a) -> Dynamic a -> Dynamic a
+
+updateMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
+updateMessages (gId, cId, msg) appState =
+  appState & guildsMap . ix gId . channels . ix cId . messages .~ Loaded msg
+
 requestChannelMessages
   :: MonadIO m
   => DiscordHandle
   -> GuildId
   -> ChannelId
-  -> ([Message] -> IO ())
+  -> ((GuildId, ChannelId, [AppMessage]) -> IO ())
   -> m ()
 requestChannelMessages handle gId cId callback = liftIO $
   restCall handle (R.GetChannelMessages cId (10, R.LatestMessages)) >>= \case
     Left errCode -> pure ()
-    Right msgs -> callback msgs
+    Right msgs -> do
+      let toAppMessage m = AppMessage (userName (messageAuthor m)) (messageText m) epochTime
+      let msgs' = fmap toAppMessage msgs
+      callback (gId, cId, msgs')
 
 handleDiscordEvent
   :: MonadIO m
@@ -238,27 +256,27 @@ serverWidget foc guilds sendUserMessage = mdo
   tog <- toggle False inp
   (newGuildId, (userSend, newChanId)) <-
     splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
-      (serversView (fmap guildsMap guilds))
+      (serversView (fmap _guildsMap guilds))
       (splitH
           (pure (subtract 12))
           foc
           (boxTitle (constant def) " Channel view "
             (channelView chanState))
           (boxTitle (constant def) " Channels "
-            (channelsView (fmap (fmap channels) currentGuild))))
+            (channelsView (fmap (fmap DiscordVty._channels) currentGuild))))
 
-  let initGuildId = guilds <&> (First . fmap fst . elemAt' 0 . guildsMap)
+  let initGuildId = guilds <&> (First . fmap fst . elemAt' 0 . _guildsMap)
   updatedGuildId <- fmap First <$> foldDyn (\x acc -> Just x) Nothing newGuildId
   let currentGuildId = getFirst <$> mconcat
         [ updatedGuildId, initGuildId ]
-  let initChanId = currentGuild <&> (First . fmap fst . (>>= elemAt' 0 . channels))
+  let initChanId = currentGuild <&> (First . fmap fst . (>>= elemAt' 0 . DiscordVty._channels))
   updatedChanId <- fmap First <$> foldDyn (\x acc -> Just x) Nothing newChanId
   let currentChanId = getFirst <$> mconcat
         [ updatedChanId, initChanId ]
-  let currentGuild = (\g gId -> gId >>= \i -> (guildsMap g) Map.!? i) <$> guilds <*> currentGuildId
+  let currentGuild = (\g gId -> gId >>= \i -> (_guildsMap g) Map.!? i) <$> guilds <*> currentGuildId
 
   let chanState = (\s gId cId -> getChannelState s gId cId)
-        <$> (fmap guildsMap guilds)
+        <$> (fmap _guildsMap guilds)
         <*> currentGuildId
         <*> currentChanId
   performEvent_ (fmap sendUserMessage userSend)
@@ -286,7 +304,7 @@ getChannelState s gId cId = do
   g <- gId
   c <- cId
   currGuild <- s Map.!? g
-  channels currGuild Map.!? c
+  DiscordVty._channels currGuild Map.!? c
 
 normal = V.defAttr
 highlighted = V.withStyle V.defAttr V.standout
@@ -307,7 +325,7 @@ serversView guilds = do
       $ fmap (fmap getFirst . mconcat) $ forM (Map.toList gs) $ \(gId, guild) -> do
         stretch $ do
           f <- focus
-          richText (highlight f) (pure (guildName' guild))
+          richText (highlight f) (pure (_guildName' guild))
           pure (bool (First Nothing) (First $ Just gId) <$> f)
   e' <- switchHold never (fmap (fmapMaybe id . updated) e)
   pure e'
@@ -334,7 +352,7 @@ channelsView channels = do
           fixed 1 $ do
             inp <- input
             f <- focus
-            richText (highlight f) (pure (channelName' chan))
+            richText (highlight f) (pure (_channelName' chan))
             pure (bool (First Nothing) (First $ Just cId) <$> f)
 
 sendMessageWidget
@@ -364,17 +382,17 @@ channelView chanState = mdo
   where
     csToLines :: Maybe ChannelState -> [Text]
     csToLines (Just m) =
-      case messages m of
+      case _messages m of
         Loaded m' -> fmap prettyMessage m'
         NotLoaded -> ["Not loaded"]
     csToLines Nothing = ["Failed to get channel state"]
     prettyMessage :: AppMessage -> Text
     prettyMessage msg =
-      T.pack (show (timestamp msg)) <>
+      T.pack (show (_timestamp msg)) <>
       "\n" <>
-      author msg <>
+      _author msg <>
       ": " <>
-      contents msg <>
+      _contents msg <>
       "\n"
 
 scrollableTextWindowed
