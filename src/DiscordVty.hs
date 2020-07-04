@@ -43,6 +43,7 @@ import Reflex.Vty.Widget
 import System.Environment
 
 type ReflexEvent = Reflex.Vty.Event
+type DiscordEvent = Discord.Types.Event
 
 data ChannelState = ChannelState
   { channelName' :: Text
@@ -72,33 +73,12 @@ app =
 
 runClient :: Text -> IO ()
 runClient token = mainWidget do
+  DiscordEvents discordEvent discordStartEvent <- setupDiscord token
+  guilds <- holdDyn (AppState mempty)
+    (fmapMaybe getGuildsEvent discordStartEvent)
   tog <- toggle True =<< tabNavigation
   let foc = fmap (bool (False, True) (True, False)) tog
-  let guilds = AppState (Map.fromList
-        [ (0, GuildState "guild1" (Map.fromList
-            [ (0, ChannelState "chan1"
-                [ AppMessage "buko" "chan1 message" epochTime
-                ])
-            , (1, ChannelState "chan2"
-                [ AppMessage "buko" "chan2 message" epochTime
-                , AppMessage "buko" "chan2 message" epochTime
-                ])
-            ]))
-        , (1, GuildState "guild2" (Map.fromList
-            [ (0, ChannelState "chan3"
-                [ AppMessage "buko" "chan3 message" epochTime
-                , AppMessage "buko" "chan3 message" epochTime
-                , AppMessage "buko" "chan3 message" epochTime
-                ])
-            , (1, ChannelState "chan4"
-                [ AppMessage "buko" "chan4 message" epochTime
-                , AppMessage "buko" "chan4 message" epochTime
-                , AppMessage "buko" "chan4 message" epochTime
-                , AppMessage "buko" "chan4 message" epochTime
-                ])
-            ]))
-        ])
-  serverWidget foc (pure guilds) sendUserMessage
+  serverWidget foc guilds sendUserMessage
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -106,6 +86,120 @@ runClient token = mainWidget do
   where
   sendUserMessage :: MonadIO m => Text -> m ()
   sendUserMessage text = pure ()
+
+handleDiscordEvent
+  :: MonadIO m
+  => DiscordHandle -> DiscordEvent -> (() -> IO ()) -> m ()
+handleDiscordEvent handle ev callback = do
+  pure ()
+
+handleOnStartEvent
+  :: MonadIO m
+  => DiscordHandle -> (DiscordStartEvent -> IO ()) -> m ()
+handleOnStartEvent handle callback = liftIO $ do
+  callback (DiscordHandleEvent handle)
+  restCall handle R.GetCurrentUserGuilds >>= \case
+    Left errCode -> pure ()
+    Right guilds -> do
+      m <- getGuildsMap handle guilds
+      callback (DiscordGuildsEvent (AppState m))
+
+toChannelMap :: [Channel] -> Map.Map ChannelId ChannelState
+toChannelMap chans = Map.fromList
+  [ (channelId c, ChannelState (channelNamePretty c) []) | c <- chans ]
+
+getGuildsMap :: DiscordHandle -> [PartialGuild] -> IO (Map.Map GuildId GuildState)
+getGuildsMap handle guilds = do
+  chans <- forM guilds \g ->
+    restCall handle (R.GetGuildChannels (partialGuildId g)) >>= \case
+      Left errCode -> pure (partialGuildId g, [])
+      Right chans -> pure (partialGuildId g, chans)
+  let channelMap = fmap toChannelMap (Map.fromList chans)
+  pure
+    (Map.fromList
+      [ (partialGuildId g, GuildState (partialGuildName g) (channelMap Map.! partialGuildId g))
+      | g <- guilds ])
+
+type TriggerDiscordEvent = (DiscordHandle, Discord.Types.Event) -> IO ()
+type OnStartEvent = DiscordHandle -> IO ()
+
+spawnDiscord
+  :: MonadIO m
+  => Text -> TriggerDiscordEvent -> OnStartEvent -> (Text -> IO ()) -> m ()
+spawnDiscord botToken triggerDiscordEvent onStartEvent callback =
+  liftIO $ void $ forkIO $ do
+    err <- runDiscord $ def
+             { discordToken = botToken
+             , discordOnEvent = curry triggerDiscordEvent
+             , discordOnStart = onStartEvent
+             }
+    callback err
+
+data DiscordStartEvent
+  = DiscordHandleEvent DiscordHandle
+  | DiscordGuildsEvent AppState
+
+getHandleEvent :: DiscordStartEvent -> Maybe DiscordHandle
+getHandleEvent = \case
+  DiscordHandleEvent h -> Just h
+  _ -> Nothing
+
+getGuildsEvent :: DiscordStartEvent -> Maybe AppState
+getGuildsEvent = \case
+  DiscordGuildsEvent g -> Just g
+  _ -> Nothing
+
+data DiscordEvents t = DiscordEvents
+  { event :: ReflexEvent t ()
+  , startEvent :: ReflexEvent t DiscordStartEvent
+  }
+
+setupDiscord
+  :: (MonadVtyApp t m, MonadNodeId m)
+  => Text
+  -> VtyWidget t m (DiscordEvents t)
+setupDiscord token = do
+  (discordEvent, triggerDiscordEvent) <- newTriggerEvent
+  (discordStartEvent, onStartEvent) <- newTriggerEvent
+  start <- getPostBuild
+  performEventAsync
+    (spawnDiscord token triggerDiscordEvent onStartEvent <$ start)
+  ev <- performEventAsync (fmap (uncurry handleDiscordEvent) discordEvent)
+  startEv <- performEventAsync (fmap handleOnStartEvent discordStartEvent)
+  pure (DiscordEvents ev startEv)
+
+getGuildChannels
+  :: MonadIO m
+  => DiscordHandle -> PartialGuild -> ([Channel] -> IO ()) -> m ()
+getGuildChannels handle guild callback = liftIO $ do
+  let command = R.GetGuildChannels (partialGuildId guild)
+  restCall handle command >>= \case
+    Left errCode -> print errCode
+    Right channels -> callback channels
+
+channelMessages
+  :: MonadIO m
+  => DiscordHandle -> Channel -> (Maybe [Text] -> IO ()) -> m ()
+channelMessages handle channel callback = liftIO $ do
+  let chanId = channelId channel
+  let command = R.GetChannelMessages chanId (5, R.LatestMessages)
+  restCall handle command >>= \case
+    Left errCode -> callback Nothing
+    Right messages -> do
+      callback (Just (fmap messageText messages))
+
+channelNamePretty :: Channel -> Text
+channelNamePretty c = case c of
+  ChannelText {} ->
+    channelName c
+  ChannelVoice {} ->
+    channelName c
+  ChannelDirectMessage {} ->
+    intercalate ", " (fmap userName $ channelRecipients c)
+  ChannelGroupDM {} ->
+    intercalate ", " (fmap userName $ channelRecipients c)
+  ChannelGuildCategory {} ->
+    "<Category>"
 
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
