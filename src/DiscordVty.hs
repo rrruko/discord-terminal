@@ -125,7 +125,10 @@ requestChannelMessages handle gId cId callback = liftIO $
   restCall handle (R.GetChannelMessages cId (10, R.LatestMessages)) >>= \case
     Left errCode -> pure ()
     Right msgs -> do
-      let toAppMessage m = AppMessage (userName (messageAuthor m)) (messageText m) epochTime
+      let toAppMessage m = AppMessage
+            (userName (messageAuthor m))
+            (messageText m)
+            (messageTimestamp m)
       let msgs' = fmap toAppMessage msgs
       callback (gId, cId, msgs')
 
@@ -261,7 +264,7 @@ serverWidget foc guilds sendUserMessage = mdo
           (boxTitle (constant def) " Channel view "
             (channelView chanState))
           (boxTitle (constant def) " Channels "
-            (channelsView (fmap (fmap DiscordVty._channels) currentGuild))))
+            (channelsView currentChanId (fmap (fmap DiscordVty._channels) currentGuild))))
 
   (currentGuildId, currentChanId) <- accumulateGuildChannel
     currentGuild
@@ -289,14 +292,14 @@ accumulateGuildChannel
   -> Dynamic t AppState
   -> m (Dynamic t (Maybe GuildId), Dynamic t (Maybe ChannelId))
 accumulateGuildChannel currentGuild newGuildId newChanId guilds = do
-  --let initGuildId = guilds <&> (fmap fst . elemAt' 0 . _guildsMap)
+  let initGuildId = guilds <&> (fmap fst . elemAt' 0 . _guildsMap)
   updatedGuildId <- foldDyn (\x acc -> Just x) Nothing newGuildId
   let currentGuildId = getFirst <$> mconcat
-        (fmap (fmap First) [ updatedGuildId])
-  --let initChanId = currentGuild <&> (fmap fst . (>>= elemAt' 0 . DiscordVty._channels))
+        (fmap (fmap First) [ updatedGuildId, initGuildId ])
+  let initChanId = currentGuild <&> (fmap fst . (>>= elemAt' 0 . DiscordVty._channels))
   updatedChanId <- foldDyn (\x acc -> Just x) Nothing newChanId
   let currentChanId = getFirst <$> mconcat
-        (fmap (fmap First) [ updatedChanId])
+        (fmap (fmap First) [ updatedChanId, initChanId ])
   pure (currentGuildId, currentChanId)
 
 elemAt' :: Int -> Map.Map a b -> Maybe (a, b)
@@ -329,32 +332,40 @@ serversView
   => Dynamic t (Map.Map GuildId GuildState)
   -> VtyWidget t m (ReflexEvent t GuildId)
 serversView guilds = do
-  e <- networkView $ guilds <&> \gs -> do
-    inp <- key V.KEnter
+  let d gs = fmap (fmap getFirst . mconcat)
+  inp <- key V.KEnter
+  e <-
     runLayout
       (constDyn Orientation_Row)
       0
       (1 <$ inp)
-      $ fmap (fmap getFirst . mconcat) $ forM (Map.toList gs) $ \(gId, guild) -> do
+      (guildsList guilds)
+  e' <- switchHold never (fmap (fmapMaybe id . updated) e)
+  pure e'
+  where
+  guildsList guilds = networkView $
+    guilds <&> \gs ->
+      fmap (fmap getFirst . mconcat) $ forM (Map.toList gs) $ \(gId, guild) -> do
         stretch $ do
           f <- focus
           richText (highlight f) (pure (_guildName' guild))
           pure (bool (First Nothing) (First $ Just gId) <$> f)
-  e' <- switchHold never (fmap (fmapMaybe id . updated) e)
-  pure e'
 
 channelsView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
-  => Dynamic t (Maybe (Map.Map ChannelId ChannelState))
+  => Dynamic t (Maybe ChannelId)
+  -> Dynamic t (Maybe (Map.Map ChannelId ChannelState))
   -> VtyWidget t m (ReflexEvent t ChannelId)
-channelsView channels = do
+channelsView selected channels = do
   inp <- input
+  let selIndex = ffor2 selected channels \sel ch -> join (liftM2 Map.lookupIndex sel ch)
   e <- networkView $
-    runLayout
-      (constDyn Orientation_Column)
-      0
-      (1 <$ inp)
-      <$> (channelsList channels)
+    ffor3 selIndex selected (channelsList channels) \ix sel ch ->
+      runLayout
+        (constDyn Orientation_Column)
+        (maybe 0 id ix)
+        (1 <$ inp)
+        ch
   switchHold never $ fmap (fmapMaybe id) e
   where
   channelsList chans =
