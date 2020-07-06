@@ -96,11 +96,13 @@ runClient token = mainWidget mdo
   reqChannelMessages <- debounce 0.5 currChanId
     <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
   let handleAvailable = fmapMaybe id (updated handle)
+      newCreatedMessages = getNewMessageContext (current guilds) discordEvent
   newMessages <- switchDyn <$> networkHold
     (pure never)
     ((\h -> performEventAsync (fmap (uncurry (requestChannelMessages h)) reqChannelMessages))
       <$> handleAvailable)
-  let appStateUpdates = fmap updateMessages newMessages
+  let appStateUpdates = iterateEvent $ fmap (fmap updateMessages) $
+        (mergeList [newMessages, newCreatedMessages])
   updatedAppStateDyn <- foldDyn (\x acc -> x . acc) id appStateUpdates
   let updatedAppState = updatedAppStateDyn <*> guilds
   inp <- input
@@ -114,9 +116,33 @@ runClient token = mainWidget mdo
       Left errCode -> pure (Just errCode)
       Right _ -> pure Nothing
 
+getNewMessageContext
+  :: (Reflex t)
+  => Behavior t AppState
+  -> ReflexEvent t NewMessage
+  -> ReflexEvent t (GuildId, ChannelId, [AppMessage])
+getNewMessageContext guilds newMsg = do
+  let e = attach guilds newMsg
+  fmapMaybe id $ ffor e (\(gs, m) -> do
+    gId <- lookupChannelGuild (newMessageChannelId m) gs
+    pure (gId, newMessageChannelId m, [newMessageContent m]))
+
+iterateEvent
+  :: (Reflex t, Foldable f, Functor f)
+  => ReflexEvent t (f (a -> a))
+  -> ReflexEvent t (a -> a)
+iterateEvent ev = fmap (appEndo . fold . fmap Endo) ev
+
 updateMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
 updateMessages (gId, cId, msg) appState =
-  appState & guildsMap . ix gId . channels . ix cId . messages .~ Loaded msg
+  appState & guildsMap . ix gId . channels . ix cId . messages %~ \case
+    NotLoaded -> Loaded msg
+    Loaded msgs -> Loaded (msg <> msgs)
+
+lookupChannelGuild :: ChannelId -> AppState -> Maybe GuildId
+lookupChannelGuild cId guilds = do
+  let gs = Map.toList (_guildsMap guilds)
+  fst <$> find (\(_, gs) -> isJust $ Map.lookup cId (DiscordVty._channels gs)) gs
 
 requestChannelMessages
   :: MonadIO m
@@ -138,9 +164,19 @@ requestChannelMessages handle gId cId callback = liftIO $
 
 handleDiscordEvent
   :: MonadIO m
-  => DiscordHandle -> DiscordEvent -> (() -> IO ()) -> m ()
-handleDiscordEvent handle ev callback = do
-  pure ()
+  => DiscordHandle -> DiscordEvent -> (NewMessage -> IO ()) -> m ()
+handleDiscordEvent handle ev callback = liftIO $ do
+  case ev of
+    MessageCreate msg -> callback $
+      NewMessage
+        (AppMessage (userName $ messageAuthor msg) (messageText msg) (messageTimestamp msg))
+        (messageChannel msg)
+    _ -> pure ()
+
+data NewMessage = NewMessage
+  { newMessageContent :: AppMessage
+  , newMessageChannelId :: ChannelId
+  }
 
 handleOnStartEvent
   :: MonadIO m
@@ -199,7 +235,7 @@ getGuildsEvent = \case
   _ -> Nothing
 
 data DiscordEvents t = DiscordEvents
-  { event :: ReflexEvent t ()
+  { event :: ReflexEvent t NewMessage
   , startEvent :: ReflexEvent t DiscordStartEvent
   }
 
