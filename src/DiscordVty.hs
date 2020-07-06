@@ -136,8 +136,8 @@ iterateEvent ev = fmap (appEndo . fold . fmap Endo) ev
 updateMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
 updateMessages (gId, cId, msg) appState =
   appState & guildsMap . ix gId . channels . ix cId . messages %~ \case
-    NotLoaded -> Loaded msg
-    Loaded msgs -> Loaded (msg <> msgs)
+    NotLoaded -> Loaded (reverse msg)
+    Loaded msgs -> Loaded (msgs <> msg)
 
 lookupChannelGuild :: ChannelId -> AppState -> Maybe GuildId
 lookupChannelGuild cId guilds = do
