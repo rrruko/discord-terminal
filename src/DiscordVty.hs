@@ -447,7 +447,7 @@ channelView chanState = mdo
     (pure (subtract 1))
     (pure (False, True))
     (scrollableTextWindowed
-      (1 <$ updated chanState)
+      never
       (csToLines <$> chanState))
     sendMessageWidget
   pure userSend
