@@ -357,14 +357,18 @@ channelsView
   -> Dynamic t (Maybe (Map.Map ChannelId ChannelState))
   -> VtyWidget t m (ReflexEvent t ChannelId)
 channelsView selected channels = do
-  inp <- input
+  up <- key V.KUp
+  down <- key V.KDown
   let selIndex = ffor2 selected channels \sel ch -> join (liftM2 Map.lookupIndex sel ch)
   e <- networkView $
     ffor3 selIndex selected (channelsList channels) \ix sel ch ->
       runLayout
         (constDyn Orientation_Column)
         (maybe 0 id ix)
-        (1 <$ inp)
+        (leftmost
+          [ (-1) <$ up
+          , 1 <$ down
+          ])
         ch
   switchHold never $ fmap (fmapMaybe id) e
   where
