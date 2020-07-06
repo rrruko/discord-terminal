@@ -88,11 +88,11 @@ runClient token = mainWidget mdo
   DiscordEvents discordEvent discordStartEvent <- setupDiscord token
   guilds <- holdDyn (AppState mempty)
     (fmapMaybe getGuildsEvent discordStartEvent)
-  handle <- holdDyn Nothing
+  handle <- improvingMaybe =<< holdDyn Nothing
     (fmapMaybe (Just . getHandleEvent) discordStartEvent)
   tog <- toggle True =<< tabNavigation
   let foc = fmap (bool (False, True) (True, False)) tog
-  currChanId <- serverWidget foc updatedAppState sendUserMessage
+  currChanId <- serverWidget handle foc updatedAppState sendUserMessage
   reqChannelMessages <- debounce 0.5 currChanId
     <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
   let handleAvailable = fmapMaybe id (updated handle)
@@ -108,8 +108,11 @@ runClient token = mainWidget mdo
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
     _ -> Nothing
   where
-  sendUserMessage :: MonadIO m => Text -> m ()
-  sendUserMessage text = pure ()
+  sendUserMessage :: MonadIO m => (DiscordHandle, Text, ChannelId) -> m (Maybe RestCallErrorCode)
+  sendUserMessage (handle, text, cId) = liftIO $
+    restCall handle (R.CreateMessage cId text) >>= \case
+      Left errCode -> pure (Just errCode)
+      Right _ -> pure Nothing
 
 updateMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
 updateMessages (gId, cId, msg) appState =
@@ -249,11 +252,12 @@ channelNamePretty c = case c of
 
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
-  => Dynamic t (Bool, Bool)
+  => Dynamic t (Maybe DiscordHandle)
+  -> Dynamic t (Bool, Bool)
   -> Dynamic t AppState
-  -> (Text -> ReaderT (VtyWidgetCtx t) (Performable m) ())
+  -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
   -> VtyWidget t m (ReflexEvent t (GuildId, ChannelId, Bool))
-serverWidget foc guilds sendUserMessage = mdo
+serverWidget handle foc guilds sendUserMessage = mdo
   inp <- key V.KEsc
   tog <- toggle False inp
   (newGuildId, (userSend, newChanId)) <-
@@ -277,7 +281,9 @@ serverWidget foc guilds sendUserMessage = mdo
         <$> (fmap _guildsMap guilds)
         <*> currentGuildId
         <*> currentChanId
-  performEvent_ (fmap sendUserMessage userSend)
+  let sendEv = attach (current handle) (attach (current currentChanId) userSend)
+  performEvent (sendUserMessage
+    <$> (sendEv & fmapMaybe (\(a,(b,c)) -> (,,) <$> a <*> pure c <*> b)))
   let isLoaded = fmap
         (\case { Just (ChannelState _ NotLoaded) -> False; _ -> True })
         chanState
