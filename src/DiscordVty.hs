@@ -27,6 +27,7 @@ import Data.Bitraversable
 import Data.Bool
 import Data.Foldable
 import qualified Data.Map as Map
+import Data.Maybe
 import Data.Monoid
 import qualified Data.Set as Set
 import Data.Text (Text, intercalate, isPrefixOf, unlines, pack, toLower)
@@ -257,7 +258,7 @@ serverWidget foc guilds sendUserMessage = mdo
   tog <- toggle False inp
   (newGuildId, (userSend, newChanId)) <-
     splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
-      (serversView (fmap _guildsMap guilds))
+      (serversView currentGuildId (fmap _guildsMap guilds))
       (splitH
           (pure (subtract 12))
           foc
@@ -272,7 +273,6 @@ serverWidget foc guilds sendUserMessage = mdo
     newChanId
     guilds
   let currentGuild = (\g gId -> gId >>= \i -> (_guildsMap g) Map.!? i) <$> guilds <*> currentGuildId
-
   let chanState = (\s gId cId -> getChannelState s gId cId)
         <$> (fmap _guildsMap guilds)
         <*> currentGuildId
@@ -296,10 +296,11 @@ accumulateGuildChannel currentGuild newGuildId newChanId guilds = do
   updatedGuildId <- foldDyn (\x acc -> Just x) Nothing newGuildId
   let currentGuildId = getFirst <$> mconcat
         (fmap (fmap First) [ updatedGuildId, initGuildId ])
-  let initChanId = currentGuild <&> (fmap fst . (>>= elemAt' 0 . DiscordVty._channels))
+  initChanId <- holdUniqDyn (currentGuild <&> (fmap fst . (>>= elemAt' 0 . DiscordVty._channels)))
+
   updatedChanId <- foldDyn (\x acc -> Just x) Nothing newChanId
-  let currentChanId = getFirst <$> mconcat
-        (fmap (fmap First) [ updatedChanId, initChanId ])
+  currentChanId <- fmap getFirst <$> (holdDyn (First Nothing) $
+    fmap First $ (leftmost [updated updatedChanId, updated initChanId]))
   pure (currentGuildId, currentChanId)
 
 elemAt' :: Int -> Map.Map a b -> Maybe (a, b)
@@ -329,21 +330,24 @@ highlight isFocused =
 
 serversView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
-  => Dynamic t (Map.Map GuildId GuildState)
+  => Dynamic t (Maybe GuildId)
+  -> Dynamic t (Map.Map GuildId GuildState)
   -> VtyWidget t m (ReflexEvent t GuildId)
-serversView guilds = do
+serversView selected guilds = do
   let d gs = fmap (fmap getFirst . mconcat)
   inp <- key V.KEnter
-  e <-
-    runLayout
-      (constDyn Orientation_Row)
-      0
-      (1 <$ inp)
-      (guildsList guilds)
+  let selIndex = ffor2 selected guilds \sel g -> join (liftM2 Map.lookupIndex sel (pure g))
+  e <- networkView $
+    ffor3 selIndex selected (guildsList guilds) \ix sel g ->
+      runLayout
+        (constDyn Orientation_Row)
+        (maybe 0 id ix)
+        (1 <$ inp)
+        g
   e' <- switchHold never (fmap (fmapMaybe id . updated) e)
   pure e'
   where
-  guildsList guilds = networkView $
+  guildsList guilds =
     guilds <&> \gs ->
       fmap (fmap getFirst . mconcat) $ forM (Map.toList gs) $ \(gId, guild) -> do
         stretch $ do
