@@ -469,7 +469,8 @@ channelView chanState = mdo
 
 scrollableTextWindowed
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
-  => ReflexEvent t Int -> Dynamic t [Text]
+  => ReflexEvent t Int
+  -> Dynamic t [Text]
   -> VtyWidget t m (Behavior t (Int, Int, Int))
 scrollableTextWindowed scrollBy contents = mdo
   f <- focus
@@ -490,7 +491,8 @@ scrollableTextWindowed scrollBy contents = mdo
 
 scrollableText'
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
-  => ReflexEvent t Int -> Dynamic t [Text]
+  => ReflexEvent t Int
+  -> Dynamic t [Text]
   -> VtyWidget t m (Behavior t (Int, Int, Int), Dynamic t Int)
 scrollableText' scrollBy contents = do
   dw <- displayWidth
