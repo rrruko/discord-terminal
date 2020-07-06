@@ -93,28 +93,38 @@ runClient token = mainWidget mdo
   tog <- toggle True =<< tabNavigation
   let foc = fmap (bool (False, True) (True, False)) tog
   currChanId <- serverWidget handle foc updatedAppState sendUserMessage
+  updatedAppState <- updateAppState handle currChanId guilds discordEvent
+  inp <- input
+  pure $ fforMaybe inp $ \case
+    V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
+    _ -> Nothing
+
+sendUserMessage :: MonadIO m => (DiscordHandle, Text, ChannelId) -> m (Maybe RestCallErrorCode)
+sendUserMessage (handle, text, cId) = liftIO $
+  restCall handle (R.CreateMessage cId text) >>= \case
+    Left errCode -> pure (Just errCode)
+    Right _ -> pure Nothing
+
+updateAppState
+  :: (MonadVtyApp t m)
+  => Dynamic t (Maybe DiscordHandle)
+  -> ReflexEvent t (GuildId, ChannelId, Bool)
+  -> Dynamic t AppState
+  -> ReflexEvent t NewMessage
+  -> VtyWidget t m (Dynamic t AppState)
+updateAppState handle currChanId guilds newMsg = do
   reqChannelMessages <- debounce 0.5 currChanId
     <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
   let handleAvailable = fmapMaybe id (updated handle)
-      newCreatedMessages = getNewMessageContext (current guilds) discordEvent
+      newCreatedMessages = getNewMessageContext (current guilds) newMsg
   newMessages <- switchDyn <$> networkHold
     (pure never)
     ((\h -> performEventAsync (fmap (uncurry (requestChannelMessages h)) reqChannelMessages))
       <$> handleAvailable)
   let appStateUpdates = iterateEvent $ fmap (fmap updateMessages) $
         (mergeList [newMessages, newCreatedMessages])
-  updatedAppStateDyn <- foldDyn (\x acc -> x . acc) id appStateUpdates
-  let updatedAppState = updatedAppStateDyn <*> guilds
-  inp <- input
-  pure $ fforMaybe inp $ \case
-    V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
-    _ -> Nothing
-  where
-  sendUserMessage :: MonadIO m => (DiscordHandle, Text, ChannelId) -> m (Maybe RestCallErrorCode)
-  sendUserMessage (handle, text, cId) = liftIO $
-    restCall handle (R.CreateMessage cId text) >>= \case
-      Left errCode -> pure (Just errCode)
-      Right _ -> pure Nothing
+  updatedAppStateDyn <- foldDyn (.) id appStateUpdates
+  pure (updatedAppStateDyn <*> guilds)
 
 getNewMessageContext
   :: (Reflex t)
