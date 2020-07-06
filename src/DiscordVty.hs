@@ -446,11 +446,9 @@ channelView chanState = mdo
   (progressB, userSend) <- splitV
     (pure (subtract 1))
     (pure (False, True))
-    (do
-      display ((("    " <>) . show) <$> progressB)
-      scrollableTextWindowed
-        (1 <$ updated chanState)
-        (csToLines <$> chanState))
+    (scrollableTextWindowed
+      (1 <$ updated chanState)
+      (csToLines <$> chanState))
     sendMessageWidget
   pure userSend
   where
