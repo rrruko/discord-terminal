@@ -1,0 +1,6 @@
+packages: .
+
+source-repository-package
+  type: git
+  location: https://github.com/rrruko/discord-haskell
+  tag: 78066f2e4d41f7a92896cc86174a3f24d6ba6598
