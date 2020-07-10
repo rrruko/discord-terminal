@@ -368,30 +368,11 @@ serversView
   -> Dynamic t (Map.Map GuildId GuildState)
   -> VtyWidget t m (ReflexEvent t GuildId)
 serversView selected guilds = do
-  let d gs = fmap (fmap getFirst . mconcat)
-  up <- keys [V.KUp, V.KChar 'k']
-  down <- keys [V.KDown, V.KChar 'j']
-  let selIndex = ffor2 selected guilds \sel g -> join (liftM2 Map.lookupIndex sel (pure g))
-  e <- networkView $
-    ffor3 selIndex selected (guildsList guilds) \ix sel g ->
-      runLayout
-        (constDyn Orientation_Row)
-        (maybe 0 id ix)
-        (leftmost
-          [ (-1) <$ up
-          , 1 <$ down
-          ])
-        g
-  e' <- switchHold never (fmap (fmapMaybe id . updated) e)
-  pure e'
-  where
-  guildsList guilds =
-    guilds <&> \gs ->
-      fmap (fmap getFirst . mconcat) $ forM (Map.toList gs) $ \(gId, guild) -> do
-        stretch $ do
-          f <- focus
-          richText (highlight f) (pure (_guildName' guild))
-          pure (bool (First Nothing) (First $ Just gId) <$> f)
+  optionList selected (fmap Just guilds) Orientation_Row \gId guild ->
+    stretch do
+      f <- focus
+      richText (highlight f) (pure (_guildName' guild))
+      pure (bool (First Nothing) (First $ Just gId) <$> f)
 
 channelsView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
@@ -399,31 +380,41 @@ channelsView
   -> Dynamic t (Maybe (Map.Map ChannelId ChannelState))
   -> VtyWidget t m (ReflexEvent t ChannelId)
 channelsView selected channels = do
+  optionList selected channels Orientation_Column \cId channel ->
+    fixed 1 do
+      f <- focus
+      richText (highlight f) (pure (_channelName' channel))
+      pure (bool (First Nothing) (First $ Just cId) <$> f)
+
+optionList
+  :: forall t m k v. (MonadVtyApp t m, MonadNodeId m, Ord k)
+  => Dynamic t (Maybe k)
+  -> Dynamic t (Maybe (Map.Map k v))
+  -> Orientation
+  -> (k -> v -> Layout t m (Dynamic t (First k)))
+  -> VtyWidget t m (ReflexEvent t k)
+optionList selected m orientation pretty = do
   up <- keys [V.KUp, V.KChar 'k']
   down <- keys [V.KDown, V.KChar 'j']
-  let selIndex = ffor2 selected channels \sel ch -> join (liftM2 Map.lookupIndex sel ch)
+  let selIndex = ffor2 selected m \sel v -> join (liftM2 Map.lookupIndex sel v)
   e <- networkView $
-    ffor3 selIndex selected (channelsList channels) \ix sel ch ->
+    ffor3 selIndex selected (makeList m) \ix sel mm ->
       runLayout
-        (constDyn Orientation_Column)
+        (constDyn orientation)
         (maybe 0 id ix)
         (leftmost
           [ (-1) <$ up
           , 1 <$ down
           ])
-        ch
-  switchHold never $ fmap (fmapMaybe id) e
+        mm
+  switchHold never (fmap (fmapMaybe id) e)
   where
-  channelsList chans =
-    chans <&> \chs ->
-      case chs of
-        Nothing -> pure never
-        Just c -> fmap (updated . fmap getFirst . mconcat) $ forM (Map.toList c) \(cId, chan) -> do
-          fixed 1 $ do
-            inp <- input
-            f <- focus
-            richText (highlight f) (pure (_channelName' chan))
-            pure (bool (First Nothing) (First $ Just cId) <$> f)
+  makeList = fmap \case
+    Nothing -> pure never
+    Just m' ->
+      fmap
+        (updated . fmap getFirst . mconcat)
+        (forM (Map.toList m') (uncurry pretty))
 
 sendMessageWidget
   :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
