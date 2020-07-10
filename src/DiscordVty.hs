@@ -263,26 +263,6 @@ setupDiscord token = do
   startEv <- performEventAsync (fmap handleOnStartEvent discordStartEvent)
   pure (DiscordEvents ev startEv)
 
-getGuildChannels
-  :: MonadIO m
-  => DiscordHandle -> PartialGuild -> ([Channel] -> IO ()) -> m ()
-getGuildChannels handle guild callback = liftIO $ do
-  let command = R.GetGuildChannels (partialGuildId guild)
-  restCall handle command >>= \case
-    Left errCode -> print errCode
-    Right channels -> callback channels
-
-channelMessages
-  :: MonadIO m
-  => DiscordHandle -> Channel -> (Maybe [Text] -> IO ()) -> m ()
-channelMessages handle channel callback = liftIO $ do
-  let chanId = channelId channel
-  let command = R.GetChannelMessages chanId (5, R.LatestMessages)
-  restCall handle command >>= \case
-    Left errCode -> callback Nothing
-    Right messages -> do
-      callback (Just (fmap messageText messages))
-
 channelNamePretty :: Channel -> Text
 channelNamePretty c = case c of
   ChannelText {} ->
