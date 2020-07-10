@@ -369,14 +369,18 @@ serversView
   -> VtyWidget t m (ReflexEvent t GuildId)
 serversView selected guilds = do
   let d gs = fmap (fmap getFirst . mconcat)
-  inp <- key V.KEnter
+  up <- keys [V.KUp, V.KChar 'k']
+  down <- keys [V.KDown, V.KChar 'j']
   let selIndex = ffor2 selected guilds \sel g -> join (liftM2 Map.lookupIndex sel (pure g))
   e <- networkView $
     ffor3 selIndex selected (guildsList guilds) \ix sel g ->
       runLayout
         (constDyn Orientation_Row)
         (maybe 0 id ix)
-        (1 <$ inp)
+        (leftmost
+          [ (-1) <$ up
+          , 1 <$ down
+          ])
         g
   e' <- switchHold never (fmap (fmapMaybe id . updated) e)
   pure e'
@@ -395,8 +399,8 @@ channelsView
   -> Dynamic t (Maybe (Map.Map ChannelId ChannelState))
   -> VtyWidget t m (ReflexEvent t ChannelId)
 channelsView selected channels = do
-  up <- key V.KUp
-  down <- key V.KDown
+  up <- keys [V.KUp, V.KChar 'k']
+  down <- keys [V.KDown, V.KChar 'j']
   let selIndex = ffor2 selected channels \sel ch -> join (liftM2 Map.lookupIndex sel ch)
   e <- networkView $
     ffor3 selIndex selected (channelsList channels) \ix sel ch ->
