@@ -275,6 +275,8 @@ channelNamePretty c = case c of
     intercalate ", " (fmap userName $ channelRecipients c)
   ChannelGuildCategory {} ->
     "<Category>"
+  _ ->
+    "Unknown"
 
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
