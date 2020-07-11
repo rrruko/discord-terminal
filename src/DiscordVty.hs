@@ -88,16 +88,28 @@ runClient token = mainWidget mdo
   DiscordEvents discordEvent discordStartEvent <- setupDiscord token
   guilds <- holdDyn (AppState mempty)
     (fmapMaybe getGuildsEvent discordStartEvent)
-  handle <- improvingMaybe =<< holdDyn Nothing
-    (fmapMaybe (Just . getHandleEvent) discordStartEvent)
-  tog <- toggle True =<< tabNavigation
-  let foc = fmap (bool (False, True) (True, False)) tog
-  currChanId <- serverWidget handle foc updatedAppState sendUserMessage
-  updatedAppState <- updateAppState handle currChanId guilds discordEvent
+  let handle = fmapMaybe getHandleEvent discordStartEvent
+  networkHold
+    (text "Acquiring handle...")
+    (fmap (runAppWithHandle guilds discordEvent) handle)
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
     _ -> Nothing
+
+runAppWithHandle
+  :: (MonadVtyApp t m, MonadNodeId m)
+  => Dynamic t AppState
+  -> Event t NewMessage
+  -> DiscordHandle
+  -> VtyWidget t m ()
+runAppWithHandle guilds discordEvent handle = mdo
+  nav <- tabNavigation
+  tog <- toggle True nav
+  let foc = fmap (bool (False, True) (True, False)) tog
+  currChanId <- serverWidget handle foc updatedAppState sendUserMessage
+  updatedAppState <- updateAppState handle currChanId guilds discordEvent
+  pure ()
 
 sendUserMessage :: MonadIO m => (DiscordHandle, Text, ChannelId) -> m (Maybe RestCallErrorCode)
 sendUserMessage (handle, text, cId) = liftIO $
@@ -107,7 +119,7 @@ sendUserMessage (handle, text, cId) = liftIO $
 
 updateAppState
   :: (MonadVtyApp t m)
-  => Dynamic t (Maybe DiscordHandle)
+  => DiscordHandle
   -> Event t (GuildId, ChannelId, Bool)
   -> Dynamic t AppState
   -> Event t NewMessage
@@ -115,12 +127,10 @@ updateAppState
 updateAppState handle currChanId guilds newMsg = do
   reqChannelMessages <- debounce 0.5 currChanId
     <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
-  let handleAvailable = fmapMaybe id (updated handle)
-      newCreatedMessages = getNewMessageContext (current guilds) newMsg
-  newMessages <- switchDyn <$> networkHold
-    (pure never)
-    ((\h -> performEventAsync (fmap (uncurry (requestChannelMessages h)) reqChannelMessages))
-      <$> handleAvailable)
+  let newCreatedMessages = getNewMessageContext (current guilds) newMsg
+  newMessages <-
+    (performEventAsync
+      (fmap (uncurry (requestChannelMessages handle)) reqChannelMessages))
   let appStateUpdates = iterateEvent $ fmap (fmap updateMessages) $
         (mergeList [newMessages, newCreatedMessages])
   updatedAppStateDyn <- foldDyn (.) id appStateUpdates
@@ -280,7 +290,7 @@ channelNamePretty c = case c of
 
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
-  => Dynamic t (Maybe DiscordHandle)
+  => DiscordHandle
   -> Dynamic t (Bool, Bool)
   -> Dynamic t AppState
   -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
@@ -309,9 +319,9 @@ serverWidget handle foc guilds sendUserMessage = mdo
         <$> (fmap _guildsMap guilds)
         <*> currentGuildId
         <*> currentChanId
-  let sendEv = attach (current handle) (attach (current currentChanId) userSend)
+  let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
   performEvent (sendUserMessage
-    <$> (sendEv & fmapMaybe (\(a,(b,c)) -> (,,) <$> a <*> pure c <*> b)))
+    <$> (sendEv & fmapMaybe (\(a,(b,c)) -> (,,) <$> pure a <*> pure c <*> b)))
   let isLoaded = fmap
         (\case { Just (ChannelState _ NotLoaded) -> False; _ -> True })
         chanState
