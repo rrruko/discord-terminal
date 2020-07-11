@@ -36,7 +36,8 @@ import qualified Data.Text.IO as TIO
 import Data.Text.Zipper
 import Discord
 import qualified Discord.Requests as R
-import Discord.Types
+import Discord.Types hiding (Event)
+import qualified Discord.Types
 import qualified Graphics.Vty as V
 import Reflex
 import Reflex.Pure
@@ -45,7 +46,6 @@ import Reflex.Vty
 import Reflex.Vty.Widget
 import System.Environment
 
-type ReflexEvent = Reflex.Vty.Event
 type DiscordEvent = Discord.Types.Event
 
 data Lazy a
@@ -108,9 +108,9 @@ sendUserMessage (handle, text, cId) = liftIO $
 updateAppState
   :: (MonadVtyApp t m)
   => Dynamic t (Maybe DiscordHandle)
-  -> ReflexEvent t (GuildId, ChannelId, Bool)
+  -> Event t (GuildId, ChannelId, Bool)
   -> Dynamic t AppState
-  -> ReflexEvent t NewMessage
+  -> Event t NewMessage
   -> VtyWidget t m (Dynamic t AppState)
 updateAppState handle currChanId guilds newMsg = do
   reqChannelMessages <- debounce 0.5 currChanId
@@ -129,8 +129,8 @@ updateAppState handle currChanId guilds newMsg = do
 getNewMessageContext
   :: (Reflex t)
   => Behavior t AppState
-  -> ReflexEvent t NewMessage
-  -> ReflexEvent t (GuildId, ChannelId, [AppMessage])
+  -> Event t NewMessage
+  -> Event t (GuildId, ChannelId, [AppMessage])
 getNewMessageContext guilds newMsg = do
   let e = attach guilds newMsg
   fmapMaybe id $ ffor e (\(gs, m) -> do
@@ -139,8 +139,8 @@ getNewMessageContext guilds newMsg = do
 
 iterateEvent
   :: (Reflex t, Foldable f, Functor f)
-  => ReflexEvent t (f (a -> a))
-  -> ReflexEvent t (a -> a)
+  => Event t (f (a -> a))
+  -> Event t (a -> a)
 iterateEvent ev = fmap (appEndo . fold . fmap Endo) ev
 
 updateMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
@@ -215,7 +215,7 @@ getGuildsMap handle guilds = do
       [ (partialGuildId g, GuildState (partialGuildName g) (channelMap Map.! partialGuildId g))
       | g <- guilds ])
 
-type TriggerDiscordEvent = (DiscordHandle, Discord.Types.Event) -> IO ()
+type TriggerDiscordEvent = (DiscordHandle, DiscordEvent) -> IO ()
 type OnStartEvent = DiscordHandle -> IO ()
 
 spawnDiscord
@@ -245,8 +245,8 @@ getGuildsEvent = \case
   _ -> Nothing
 
 data DiscordEvents t = DiscordEvents
-  { event :: ReflexEvent t NewMessage
-  , startEvent :: ReflexEvent t DiscordStartEvent
+  { event :: Event t NewMessage
+  , startEvent :: Event t DiscordStartEvent
   }
 
 setupDiscord
@@ -284,7 +284,7 @@ serverWidget
   -> Dynamic t (Bool, Bool)
   -> Dynamic t AppState
   -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
-  -> VtyWidget t m (ReflexEvent t (GuildId, ChannelId, Bool))
+  -> VtyWidget t m (Event t (GuildId, ChannelId, Bool))
 serverWidget handle foc guilds sendUserMessage = mdo
   inp <- key V.KEsc
   tog <- toggle False inp
@@ -321,8 +321,8 @@ serverWidget handle foc guilds sendUserMessage = mdo
 accumulateGuildChannel
   :: (Reflex t, MonadHold t m, MonadFix m)
   => Dynamic t (Maybe GuildState)
-  -> ReflexEvent t GuildId
-  -> ReflexEvent t ChannelId
+  -> Event t GuildId
+  -> Event t ChannelId
   -> Dynamic t AppState
   -> m (Dynamic t (Maybe GuildId), Dynamic t (Maybe ChannelId))
 accumulateGuildChannel currentGuild newGuildId newChanId guilds = do
@@ -366,7 +366,7 @@ serversView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
   => Dynamic t (Maybe GuildId)
   -> Dynamic t (Map.Map GuildId GuildState)
-  -> VtyWidget t m (ReflexEvent t GuildId)
+  -> VtyWidget t m (Event t GuildId)
 serversView selected guilds = do
   optionList selected (fmap Just guilds) Orientation_Row \gId guild ->
     stretch do
@@ -378,7 +378,7 @@ channelsView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
   => Dynamic t (Maybe ChannelId)
   -> Dynamic t (Maybe (Map.Map ChannelId ChannelState))
-  -> VtyWidget t m (ReflexEvent t ChannelId)
+  -> VtyWidget t m (Event t ChannelId)
 channelsView selected channels = do
   optionList selected channels Orientation_Column \cId channel ->
     fixed 1 do
@@ -392,7 +392,7 @@ optionList
   -> Dynamic t (Maybe (Map.Map k v))
   -> Orientation
   -> (k -> v -> Layout t m (Dynamic t (First k)))
-  -> VtyWidget t m (ReflexEvent t k)
+  -> VtyWidget t m (Event t k)
 optionList selected m orientation pretty = do
   up <- keys [V.KUp, V.KChar 'k']
   down <- keys [V.KDown, V.KChar 'j']
@@ -418,17 +418,17 @@ optionList selected m orientation pretty = do
 
 sendMessageWidget
   :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
-  => VtyWidget t m (ReflexEvent t Text)
+  => VtyWidget t m (Event t Text)
 sendMessageWidget = do
   send <- key V.KEnter
-  textInp <- textInput (def { _textInputConfig_modify = const empty <$ send })
+  textInp <- textInput' (def { _textInputConfig_modify = const empty <$ send })
   let userInput = current (textInp & _textInput_value) `tag` send
   pure userInput
 
 channelView
   :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
   => Dynamic t (Maybe ChannelState)
-  -> VtyWidget t m (ReflexEvent t Text)
+  -> VtyWidget t m (Event t Text)
 channelView chanState = mdo
   (progressB, userSend) <- splitV
     (pure (subtract 1))
@@ -456,7 +456,7 @@ channelView chanState = mdo
 
 scrollableTextWindowed
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
-  => ReflexEvent t Int
+  => Event t Int
   -> Dynamic t [Text]
   -> VtyWidget t m (Behavior t (Int, Int, Int))
 scrollableTextWindowed scrollBy contents = mdo
@@ -478,7 +478,7 @@ scrollableTextWindowed scrollBy contents = mdo
 
 scrollableText'
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
-  => ReflexEvent t Int
+  => Event t Int
   -> Dynamic t [Text]
   -> VtyWidget t m (Behavior t (Int, Int, Int), Dynamic t Int)
 scrollableText' scrollBy contents = do
@@ -488,7 +488,7 @@ scrollableText' scrollBy contents = do
   kup <- key V.KUp
   kdown <- key V.KDown
   m <- mouseScroll
-  let requestedScroll :: ReflexEvent t Int
+  let requestedScroll :: Event t Int
       requestedScroll = leftmost
         [ 1 <$ kdown
         , (-1) <$ kup
@@ -510,3 +510,43 @@ scrollableText' scrollBy contents = do
   wrap maxWidth =
     concatMap (fmap (V.string V.defAttr . T.unpack) . wrapWithOffset maxWidth 0) .
     T.split (=='\n')
+
+-- This is just the reflex-vty textInput widget with tab inputs filtered out.
+-- I'm using tab for navigation and I don't want to worry about keeping my
+-- input widget unfocused when the user is trying to tab out.
+textInput'
+  :: (Reflex t, MonadHold t m, MonadFix m)
+  => TextInputConfig t
+  -> VtyWidget t m (TextInput t)
+textInput' cfg = do
+  i <- input <&> ffilter (\ev -> ev /= V.EvKey (V.KChar '\t') [])
+  f <- focus
+  dh <- displayHeight
+  dw <- displayWidth
+  rec v <- foldDyn ($) (_textInputConfig_initialValue cfg) $ mergeWith (.)
+        [ uncurry (updateTextZipper (_textInputConfig_tabWidth cfg)) <$> attach (current dh) i
+        , _textInputConfig_modify cfg
+        , let displayInfo = (,) <$> current rows <*> scrollTop
+          in ffor (attach displayInfo click) $ \((dl, st), MouseDown _ (mx, my) _) ->
+            goToDisplayLinePosition mx (st + my) dl
+        ]
+      click <- mouseDown V.BLeft
+      let cursorAttrs = ffor f $ \x -> if x then cursorAttributes else V.defAttr
+      let rows = (\w s c -> displayLines w V.defAttr c s)
+            <$> dw
+            <*> (mapZipper <$> _textInputConfig_display cfg <*> v)
+            <*> cursorAttrs
+          img = images . _displayLines_spans <$> rows
+      y <- holdUniqDyn $ _displayLines_cursorY <$> rows
+      let newScrollTop :: Int -> (Int, Int) -> Int
+          newScrollTop st (h, cursorY)
+            | cursorY < st = cursorY
+            | cursorY >= st + h = cursorY - h + 1
+            | otherwise = st
+      let hy = attachWith newScrollTop scrollTop $ updated $ zipDyn dh y
+      scrollTop <- hold 0 hy
+      tellImages $ (\imgs st -> (:[]) . V.vertCat $ drop st imgs) <$> current img <*> scrollTop
+  return $ TextInput
+    { _textInput_value = value <$> v
+    , _textInput_lines = length . _displayLines_spans <$> rows
+    }
