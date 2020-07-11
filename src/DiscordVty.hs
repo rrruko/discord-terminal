@@ -6,6 +6,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE RankNTypes #-}
 
@@ -26,6 +27,9 @@ import Data.Bifunctor
 import Data.Bitraversable
 import Data.Bool
 import Data.Foldable
+import Data.Function (on)
+import Data.List (elemIndex, find, sortOn, partition)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
 import Data.Maybe
 import Data.Monoid
@@ -62,6 +66,10 @@ makeLenses ''AppMessage
 
 data ChannelState = ChannelState
   { _channelName' :: Text
+  , _channelId' :: ChannelId
+  , _channelPosition' :: Maybe Integer
+  , _channelParentId' :: Maybe ChannelId
+  , _channelIsCategory :: Bool
   , _messages :: Lazy [AppMessage]
   } deriving (Show)
 makeLenses ''ChannelState
@@ -207,8 +215,24 @@ handleOnStartEvent handle callback = liftIO $ do
       callback (DiscordGuildsEvent (AppState m))
 
 toChannelMap :: [Channel] -> Map.Map ChannelId ChannelState
-toChannelMap chans = Map.fromList
-  [ (channelId c, ChannelState (channelNamePretty c) NotLoaded) | c <- chans ]
+toChannelMap chans = Map.fromList [ (channelId c, initChan c) | c <- chans ]
+  where
+  initChan c =
+    ChannelState
+      (channelNamePretty c)
+      (channelId c)
+      (channelPosition' c)
+      (channelParentId c)
+      (c & \case { ChannelGuildCategory {} -> True; _ -> False })
+      NotLoaded
+  channelPosition' c = case c of
+    ChannelText {} -> channelPosition c
+    ChannelNews {} -> channelPosition c
+    ChannelStorePage {} -> channelPosition c
+    ChannelVoice {} -> channelPosition c
+    ChannelGuildCategory {} -> channelPosition c
+    ChannelDirectMessage {} -> Nothing
+    ChannelGroupDM {} -> Nothing
 
 getGuildsMap :: DiscordHandle -> [PartialGuild] -> IO (Map.Map GuildId GuildState)
 getGuildsMap handle guilds = do
@@ -216,11 +240,18 @@ getGuildsMap handle guilds = do
     restCall handle (R.GetGuildChannels (partialGuildId g)) >>= \case
       Left errCode -> pure (partialGuildId g, [])
       Right chans -> pure (partialGuildId g, chans)
-  let channelMap = fmap toChannelMap (Map.fromList chans)
+  let
+    channelMap = fmap toChannelMap (Map.fromList chans)
   pure
     (Map.fromList
       [ (partialGuildId g, GuildState (partialGuildName g) (channelMap Map.! partialGuildId g))
       | g <- guilds ])
+  where
+  isValidChannel = \case
+    ChannelText {} -> True
+    ChannelNews {} -> True
+    ChannelGuildCategory {} -> True
+    _ -> False
 
 type TriggerDiscordEvent = (DiscordHandle, DiscordEvent) -> IO ()
 type OnStartEvent = DiscordHandle -> IO ()
@@ -281,7 +312,7 @@ channelNamePretty c = case c of
   ChannelGroupDM {} ->
     intercalate ", " (fmap userName $ channelRecipients c)
   ChannelGuildCategory {} ->
-    "<Category>"
+    "[" <> channelName c <> "]"
   _ ->
     "Unknown"
 
@@ -325,7 +356,7 @@ serverWidget handle guilds sendUserMessage = mdo
     <$> (sendEv & fmapMaybe (\(a,(b,c)) -> (,,) <$> pure a <*> pure c <*> b)))
 
   let isLoaded = fmap
-        (\case { Just (ChannelState _ NotLoaded) -> False; _ -> True })
+        (\case { Just (ChannelState _ _ _ _ _ NotLoaded) -> False; _ -> True })
         chanState
   let updatedGuildChanId = (,,) <$> currentGuildId <*> currentChanId <*> isLoaded
   pure (fforMaybe (updated updatedGuildChanId) (\(a,b,c) -> (,,) <$> a <*> b <*> Just c))
@@ -351,7 +382,7 @@ accumulateGuildChannel currentGuild newGuildId newChanId guilds = do
   let savedChanId = ffor2 selectedChannels currentGuildId (Map.!?)
   updatedChanId <- foldDyn (\x acc -> Just x) Nothing newChanId
   let currentChanId = ffor3 updatedChanId savedChanId initChanId \uC sC iC ->
-        getFirst (foldMap First [sC, uC, iC])
+        getFirst (foldMap First [sC, iC, uC])
   pure (currentGuildId, currentChanId)
 
 elemAt' :: Int -> Map.Map a b -> Maybe (a, b)
@@ -388,7 +419,7 @@ serversView selected guilds = join $ fmap (switchHold never) $ networkView $
   ffor2 selected guilds \sel gs ->
     case (sel, gs) of
       (Just s, g) ->
-        optionList s g Orientation_Row \gId guild ->
+        optionList s g Orientation_Row const \gId guild ->
           stretch do
             f <- focus
             richText (highlight f) (pure (_guildName' guild))
@@ -404,24 +435,38 @@ channelsView selected channels = join $ fmap (switchHold never) $ networkView $
   ffor2 selected channels \sel ch ->
     case (sel, ch) of
       (Just s, Just c) ->
-        optionList s c Orientation_Column \cId channel ->
+        optionList s c Orientation_Column (\k v -> sortKey' (Map.elems c) v) \cId channel ->
           fixed 1 do
             f <- focus
             richText (highlight f) (pure (_channelName' channel))
             pure (bool (First Nothing) (First $ Just cId) <$> f)
       _ -> pure never
 
+sortKey' :: [ChannelState] -> ChannelState -> (Maybe Integer, Maybe Integer)
+sortKey' chans this =
+  let
+    parentKey = _channelParentId' this
+    parentChannel = find ((==parentKey) . Just . _channelId') chans
+    parentPosition = _channelPosition' =<< parentChannel
+    textChannelPosition
+      | _channelIsCategory this = Nothing
+      | otherwise = _channelPosition' this
+  in
+    (getFirst (foldMap First [parentPosition, _channelPosition' this])
+    , textChannelPosition)
+
 optionList
-  :: forall t m k v. (MonadVtyApp t m, MonadNodeId m, Ord k)
+  :: forall t m k v a. (MonadVtyApp t m, MonadNodeId m, Ord k, Ord a)
   => k
   -> Map.Map k v
   -> Orientation
+  -> (k -> v -> a)
   -> (k -> v -> Layout t m (Dynamic t (First k)))
   -> VtyWidget t m (Event t k)
-optionList selected m orientation pretty = do
+optionList selected m orientation sortKey pretty = do
   up <- keys [V.KUp, V.KChar 'k']
   down <- keys [V.KDown, V.KChar 'j']
-  let selIndex = Map.lookupIndex selected m
+  let selIndex = elemIndex selected (fmap fst (sortOn (uncurry sortKey) (Map.toList m)))
   fmapMaybe id <$> runLayout
     (constDyn orientation)
     (maybe 0 id selIndex)
@@ -434,7 +479,7 @@ optionList selected m orientation pretty = do
   makeList m' =
     fmap
       (updated . fmap getFirst . mconcat)
-      (forM (Map.toList m') (uncurry pretty))
+      (forM ((sortOn (uncurry sortKey) (Map.toList m'))) (uncurry pretty))
 
 sendMessageWidget
   :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
