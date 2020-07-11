@@ -104,10 +104,7 @@ runAppWithHandle
   -> DiscordHandle
   -> VtyWidget t m ()
 runAppWithHandle guilds discordEvent handle = mdo
-  nav <- tabNavigation
-  tog <- toggle True nav
-  let foc = fmap (bool (False, True) (True, False)) tog
-  currChanId <- serverWidget handle foc updatedAppState sendUserMessage
+  currChanId <- serverWidget handle updatedAppState sendUserMessage
   updatedAppState <- updateAppState handle currChanId guilds discordEvent
   pure ()
 
@@ -291,13 +288,15 @@ channelNamePretty c = case c of
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
   => DiscordHandle
-  -> Dynamic t (Bool, Bool)
   -> Dynamic t AppState
   -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
   -> VtyWidget t m (Event t (GuildId, ChannelId, Bool))
-serverWidget handle foc guilds sendUserMessage = mdo
+serverWidget handle guilds sendUserMessage = mdo
   inp <- key V.KEsc
   tog <- toggle False inp
+  nav <- tabNavigation
+  navTog <- toggle True nav
+  let foc = fmap (bool (False, True) (True, False)) navTog
   (newGuildId, (userSend, newChanId)) <-
     splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
       (serversView currentGuildId (fmap _guildsMap guilds))
