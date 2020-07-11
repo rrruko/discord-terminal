@@ -301,12 +301,12 @@ serverWidget handle guilds sendUserMessage = mdo
     splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
       (serversView currentGuildId (fmap _guildsMap guilds))
       (splitH
-          (pure (subtract 12))
-          foc
-          (boxTitle (constant def) " Channel view "
-            (channelView chanState))
-          (boxTitle (constant def) " Channels "
-            (channelsView currentChanId (fmap (fmap DiscordVty._channels) currentGuild))))
+        (pure (subtract 12))
+        foc
+        (boxTitle (constant def) " Channel view "
+          (channelView chanState))
+        (boxTitle (constant def) " Channels "
+          (channelsView currentChanId (fmap (fmap DiscordVty._channels) currentGuild))))
 
   (currentGuildId, currentChanId) <-
     accumulateGuildChannel
@@ -343,10 +343,15 @@ accumulateGuildChannel currentGuild newGuildId newChanId guilds = do
   let currentGuildId = getFirst <$> mconcat
         (fmap (fmap First) [ updatedGuildId, initGuildId ])
   initChanId <- holdUniqDyn (currentGuild <&> (fmap fst . (>>= elemAt' 0 . DiscordVty._channels)))
-
+  selectedChannels <-
+    foldDyn
+      (uncurry Map.insert)
+      mempty
+      (attachPromptlyDyn currentGuildId newChanId)
+  let savedChanId = ffor2 selectedChannels currentGuildId (Map.!?)
   updatedChanId <- foldDyn (\x acc -> Just x) Nothing newChanId
-  currentChanId <- fmap getFirst <$> (holdDyn (First Nothing) $
-    fmap First $ (leftmost [updated updatedChanId, updated initChanId]))
+  let currentChanId = ffor3 updatedChanId savedChanId initChanId \uC sC iC ->
+        getFirst (foldMap First [sC, uC, iC])
   pure (currentGuildId, currentChanId)
 
 elemAt' :: Int -> Map.Map a b -> Maybe (a, b)
