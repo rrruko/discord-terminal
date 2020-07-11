@@ -308,19 +308,22 @@ serverWidget handle guilds sendUserMessage = mdo
           (boxTitle (constant def) " Channels "
             (channelsView currentChanId (fmap (fmap DiscordVty._channels) currentGuild))))
 
-  (currentGuildId, currentChanId) <- accumulateGuildChannel
-    currentGuild
-    newGuildId
-    newChanId
-    guilds
+  (currentGuildId, currentChanId) <-
+    accumulateGuildChannel
+      currentGuild
+      newGuildId
+      newChanId
+      guilds
   let currentGuild = (\g gId -> gId >>= \i -> (_guildsMap g) Map.!? i) <$> guilds <*> currentGuildId
   let chanState = (\s gId cId -> getChannelState s gId cId)
         <$> (fmap _guildsMap guilds)
         <*> currentGuildId
         <*> currentChanId
+
   let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
   performEvent (sendUserMessage
     <$> (sendEv & fmapMaybe (\(a,(b,c)) -> (,,) <$> pure a <*> pure c <*> b)))
+
   let isLoaded = fmap
         (\case { Just (ChannelState _ NotLoaded) -> False; _ -> True })
         chanState
@@ -376,54 +379,57 @@ serversView
   => Dynamic t (Maybe GuildId)
   -> Dynamic t (Map.Map GuildId GuildState)
   -> VtyWidget t m (Event t GuildId)
-serversView selected guilds = do
-  optionList selected (fmap Just guilds) Orientation_Row \gId guild ->
-    stretch do
-      f <- focus
-      richText (highlight f) (pure (_guildName' guild))
-      pure (bool (First Nothing) (First $ Just gId) <$> f)
+serversView selected guilds = join $ fmap (switchHold never) $ networkView $
+  ffor2 selected guilds \sel gs ->
+    case (sel, gs) of
+      (Just s, g) ->
+        optionList s g Orientation_Row \gId guild ->
+          stretch do
+            f <- focus
+            richText (highlight f) (pure (_guildName' guild))
+            pure (bool (First Nothing) (First $ Just gId) <$> f)
+      _ -> pure never
 
 channelsView
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
   => Dynamic t (Maybe ChannelId)
   -> Dynamic t (Maybe (Map.Map ChannelId ChannelState))
   -> VtyWidget t m (Event t ChannelId)
-channelsView selected channels = do
-  optionList selected channels Orientation_Column \cId channel ->
-    fixed 1 do
-      f <- focus
-      richText (highlight f) (pure (_channelName' channel))
-      pure (bool (First Nothing) (First $ Just cId) <$> f)
+channelsView selected channels = join $ fmap (switchHold never) $ networkView $
+  ffor2 selected channels \sel ch ->
+    case (sel, ch) of
+      (Just s, Just c) ->
+        optionList s c Orientation_Column \cId channel ->
+          fixed 1 do
+            f <- focus
+            richText (highlight f) (pure (_channelName' channel))
+            pure (bool (First Nothing) (First $ Just cId) <$> f)
+      _ -> pure never
 
 optionList
   :: forall t m k v. (MonadVtyApp t m, MonadNodeId m, Ord k)
-  => Dynamic t (Maybe k)
-  -> Dynamic t (Maybe (Map.Map k v))
+  => k
+  -> Map.Map k v
   -> Orientation
   -> (k -> v -> Layout t m (Dynamic t (First k)))
   -> VtyWidget t m (Event t k)
 optionList selected m orientation pretty = do
   up <- keys [V.KUp, V.KChar 'k']
   down <- keys [V.KDown, V.KChar 'j']
-  let selIndex = ffor2 selected m \sel v -> join (liftM2 Map.lookupIndex sel v)
-  e <- networkView $
-    ffor3 selIndex selected (makeList m) \ix sel mm ->
-      runLayout
-        (constDyn orientation)
-        (maybe 0 id ix)
-        (leftmost
-          [ (-1) <$ up
-          , 1 <$ down
-          ])
-        mm
-  switchHold never (fmap (fmapMaybe id) e)
+  let selIndex = Map.lookupIndex selected m
+  fmapMaybe id <$> runLayout
+    (constDyn orientation)
+    (maybe 0 id selIndex)
+    (leftmost
+      [ (-1) <$ up
+      , 1 <$ down
+      ])
+    (makeList m)
   where
-  makeList = fmap \case
-    Nothing -> pure never
-    Just m' ->
-      fmap
-        (updated . fmap getFirst . mconcat)
-        (forM (Map.toList m') (uncurry pretty))
+  makeList m' =
+    fmap
+      (updated . fmap getFirst . mconcat)
+      (forM (Map.toList m') (uncurry pretty))
 
 sendMessageWidget
   :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
