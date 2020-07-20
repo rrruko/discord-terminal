@@ -88,7 +88,10 @@ mentionWidget
 mentionWidget users = do
   submitMention <- key V.KEnter
   quit <- keyCombo (V.KChar 'a', [V.MCtrl])
-  textInp <- textInput def
+  rec
+    textInp <- runLayout (constDyn Orientation_Column) 1 never $ do
+      fixed 1 (userNameChoices (_textInput_value textInp) users)
+      fixed 1 (textInput def)
   let
     mentionedUser = tag (current (_textInput_value textInp)) submitMention
     mention = fmapMaybe (\name -> users M.!? name) mentionedUser
@@ -97,6 +100,20 @@ mentionWidget users = do
       [ SubmitMention <$> mention
       , QuitMention <$ quit
       ])
+
+userNameChoices
+  :: forall t m. EditorConstraints t m
+  => Dynamic t T.Text
+  -> M.Map T.Text UserId
+  -> VtyWidget t m ()
+userNameChoices prefix names =
+  text $ current $
+    ffor prefix (\p ->
+      let
+        nameList = M.keys names
+        choices = filter (p `T.isPrefixOf`) nameList
+      in
+        (T.intercalate ", " choices))
 
 editWidget
   :: forall t m. EditorConstraints t m
