@@ -50,6 +50,8 @@ import Reflex.Vty
 import Reflex.Vty.Widget
 import System.Environment
 
+import Editor (editor)
+
 type DiscordEvent = Discord.Types.Event
 
 data Lazy a
@@ -487,21 +489,25 @@ sendMessageWidget
 sendMessageWidget = do
   send <- key V.KEnter
   textInp <- textInput' (def { _textInputConfig_modify = const empty <$ send })
+
   let userInput = current (textInp & _textInput_value) `tag` send
   pure userInput
 
+fakeUsers :: Map.Map Text UserId
+fakeUsers = Map.fromList [ ("ruko", 162951695469510656) ]
+
 channelView
-  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
+  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
   => Dynamic t (Maybe ChannelState)
   -> VtyWidget t m (Event t Text)
 channelView chanState = mdo
   (progressB, userSend) <- splitV
-    (pure (subtract 1))
+    (pure (subtract 2))
     (pure (False, True))
     (scrollableTextWindowed
       never
       (csToLines <$> chanState))
-    sendMessageWidget
+    (editor (pure fakeUsers))
   pure userSend
   where
     csToLines :: Maybe ChannelState -> [Text]
