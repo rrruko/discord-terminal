@@ -94,15 +94,22 @@ app =
     (botToken : _) -> runClient (pack botToken)
     _ -> putStrLn "No token supplied."
 
+bothEvents :: (Reflex t, MonadHold t m) => Event t a -> Event t b -> m (Event t (a, b))
+bothEvents a b = do
+  aCurrent <- holdDyn Nothing (Just <$> a)
+  bCurrent <- holdDyn Nothing (Just <$> b)
+  let both = (,) <$> aCurrent <*> bCurrent
+  pure $ updated both & fmapMaybe (uncurry (liftM2 (,)))
+
 runClient :: Text -> IO ()
 runClient token = mainWidget mdo
   DiscordEvents discordEvent discordStartEvent <- setupDiscord token
-  guilds <- holdDyn (AppState mempty)
-    (fmapMaybe getGuildsEvent discordStartEvent)
+  let guilds = fmapMaybe getGuildsEvent discordStartEvent
   let handle = fmapMaybe getHandleEvent discordStartEvent
+  guildsAndHandle <- bothEvents guilds handle
   networkHold
-    (text "Acquiring handle...")
-    (fmap (runAppWithHandle guilds discordEvent) handle)
+    (text "Acquiring guilds and handle...")
+    (fmap (\(g, h) -> runAppWithHandle g h discordEvent) guildsAndHandle)
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -110,11 +117,11 @@ runClient token = mainWidget mdo
 
 runAppWithHandle
   :: (MonadVtyApp t m, MonadNodeId m)
-  => Dynamic t AppState
-  -> Event t NewMessage
+  => AppState
   -> DiscordHandle
+  -> Event t NewMessage
   -> VtyWidget t m ()
-runAppWithHandle guilds discordEvent handle = mdo
+runAppWithHandle guilds handle discordEvent = mdo
   currChanId <- serverWidget handle updatedAppState sendUserMessage
   updatedAppState <- updateAppState handle currChanId guilds discordEvent
   pure ()
@@ -129,13 +136,13 @@ updateAppState
   :: (MonadVtyApp t m)
   => DiscordHandle
   -> Event t (GuildId, ChannelId, Bool)
-  -> Dynamic t AppState
+  -> AppState
   -> Event t NewMessage
   -> VtyWidget t m (Dynamic t AppState)
-updateAppState handle currChanId guilds newMsg = do
+updateAppState handle currChanId guilds newMsg = mdo
   reqChannelMessages <- debounce 0.5 currChanId
     <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
-  let newCreatedMessages = getNewMessageContext (current guilds) newMsg
+  let newCreatedMessages = getNewMessageContext (current updatedAppStateDyn) newMsg
   newMessages <-
     (performEventAsync
       (fmap (uncurry (requestChannelMessages handle)) reqChannelMessages))
@@ -147,9 +154,9 @@ updateAppState handle currChanId guilds newMsg = do
     (performEventAsync
       (fmap (requestGuildUsers handle) reqGuildUsers))
   let guildUsersUpdates = uncurry updateUsers <$> guildUsers
-  updatedAppStateDyn <- foldDyn (.) id
+  updatedAppStateDyn <- foldDyn ($) guilds
     (iterateEvent (mergeList [appStateUpdates, guildUsersUpdates]))
-  pure (updatedAppStateDyn <*> guilds)
+  pure (updatedAppStateDyn)
 
 uniqEvent :: (Reflex t, MonadHold t m, Eq a) => Event t a -> m (Event t a)
 uniqEvent ev = do
@@ -476,15 +483,15 @@ channelsView selected channels = join $ fmap (switchHold never) $ networkView $
   ffor2 selected channels \sel ch ->
     case (sel, ch) of
       (Just s, Just c) ->
-        optionList s c Orientation_Column (\k v -> sortKey' (Map.elems c) v) \cId channel ->
+        optionList s c Orientation_Column (\k v -> sortKey (Map.elems c) v) \cId channel ->
           fixed 1 do
             f <- focus
             richText (highlight f) (pure (_channelName' channel))
             pure (bool (First Nothing) (First $ Just cId) <$> f)
       _ -> pure never
 
-sortKey' :: [ChannelState] -> ChannelState -> (Maybe Integer, Maybe Integer)
-sortKey' chans this =
+sortKey :: [ChannelState] -> ChannelState -> (Maybe Integer, Maybe Integer)
+sortKey chans this =
   let
     parentKey = _channelParentId' this
     parentChannel = find ((==parentKey) . Just . _channelId') chans
@@ -493,8 +500,9 @@ sortKey' chans this =
       | _channelIsCategory this = Nothing
       | otherwise = _channelPosition' this
   in
-    (getFirst (foldMap First [parentPosition, _channelPosition' this])
-    , textChannelPosition)
+    ( getFirst (foldMap First [parentPosition, _channelPosition' this])
+    , textChannelPosition
+    )
 
 optionList
   :: forall t m k v a. (MonadVtyApp t m, MonadNodeId m, Ord k, Ord a)
