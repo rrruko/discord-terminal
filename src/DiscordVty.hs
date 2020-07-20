@@ -79,6 +79,7 @@ makeLenses ''ChannelState
 data GuildState = GuildState
   { _guildName' :: Text
   , _channels :: Map.Map ChannelId ChannelState
+  , _members :: Map.Map UserId GuildMember
   }
 makeLenses ''GuildState
 
@@ -140,8 +141,40 @@ updateAppState handle currChanId guilds newMsg = do
       (fmap (uncurry (requestChannelMessages handle)) reqChannelMessages))
   let appStateUpdates = iterateEvent $ fmap (fmap updateMessages) $
         (mergeList [newMessages, newCreatedMessages])
-  updatedAppStateDyn <- foldDyn (.) id appStateUpdates
+  guildChanged <- uniqEvent (fmap (\(a,_,_) -> a) currChanId)
+  reqGuildUsers <- debounce 0.5 guildChanged
+  guildUsers <-
+    (performEventAsync
+      (fmap (requestGuildUsers handle) reqGuildUsers))
+  let guildUsersUpdates = uncurry updateUsers <$> guildUsers
+  updatedAppStateDyn <- foldDyn (.) id
+    (iterateEvent (mergeList [appStateUpdates, guildUsersUpdates]))
   pure (updatedAppStateDyn <*> guilds)
+
+uniqEvent :: (Reflex t, MonadHold t m, Eq a) => Event t a -> m (Event t a)
+uniqEvent ev = do
+  latest <- holdDyn Nothing (fmap Just ev)
+  let fireWhenNew = attachWith
+        (\last curr -> if last == Just curr then Nothing else Just curr)
+        (current latest)
+        ev
+  pure (fmapMaybe id fireWhenNew)
+
+updateUsers :: GuildId -> [GuildMember] -> AppState -> AppState
+updateUsers gId newMembers appState =
+  appState & guildsMap . ix gId . members %~
+    const (Map.fromList (fmap (\x -> (userId (memberUser x), x)) newMembers))
+
+requestGuildUsers
+  :: MonadIO m
+  => DiscordHandle
+  -> GuildId
+  -> ((GuildId, [GuildMember]) -> IO ())
+  -> m ()
+requestGuildUsers handle gId callback = liftIO do
+  restCall handle (R.ListGuildMembers gId (R.GuildMembersTiming (Just 100) Nothing)) >>= \case
+    Left errCode -> pure ()
+    Right users -> callback (gId, users)
 
 getNewMessageContext
   :: (Reflex t)
@@ -246,7 +279,7 @@ getGuildsMap handle guilds = do
     channelMap = fmap toChannelMap (Map.fromList chans)
   pure
     (Map.fromList
-      [ (partialGuildId g, GuildState (partialGuildName g) (channelMap Map.! partialGuildId g))
+      [ (partialGuildId g, GuildState (partialGuildName g) (channelMap Map.! partialGuildId g) mempty)
       | g <- guilds ])
   where
   isValidChannel = \case
@@ -337,7 +370,7 @@ serverWidget handle guilds sendUserMessage = mdo
         (pure (subtract 12))
         foc
         (boxTitle (constant def) " Channel view "
-          (channelView chanState))
+          (channelView chanState users))
         (boxTitle (constant def) " Channels "
           (channelsView currentChanId (fmap (fmap DiscordVty._channels) currentGuild))))
 
@@ -347,6 +380,12 @@ serverWidget handle guilds sendUserMessage = mdo
       newGuildId
       newChanId
       guilds
+
+  let users = currentGuild
+        <&> (\gs -> maybe mempty _members gs)
+        <&> (\uToM -> Map.mapKeys (\uId -> userName (memberUser (uToM Map.! uId))) uToM)
+        <&> Map.map (\mem -> userId (memberUser mem))
+
   let currentGuild = (\g gId -> gId >>= \i -> (_guildsMap g) Map.!? i) <$> guilds <*> currentGuildId
   let chanState = (\s gId cId -> getChannelState s gId cId)
         <$> (fmap _guildsMap guilds)
@@ -483,31 +522,19 @@ optionList selected m orientation sortKey pretty = do
       (updated . fmap getFirst . mconcat)
       (forM ((sortOn (uncurry sortKey) (Map.toList m'))) (uncurry pretty))
 
-sendMessageWidget
-  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m)
-  => VtyWidget t m (Event t Text)
-sendMessageWidget = do
-  send <- key V.KEnter
-  textInp <- textInput' (def { _textInputConfig_modify = const empty <$ send })
-
-  let userInput = current (textInp & _textInput_value) `tag` send
-  pure userInput
-
-fakeUsers :: Map.Map Text UserId
-fakeUsers = Map.fromList [ ("ruko", 162951695469510656) ]
-
 channelView
   :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
   => Dynamic t (Maybe ChannelState)
+  -> Dynamic t (Map.Map Text UserId)
   -> VtyWidget t m (Event t Text)
-channelView chanState = mdo
+channelView chanState users = mdo
   (progressB, userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
     (scrollableTextWindowed
       never
       (csToLines <$> chanState))
-    (editor (pure fakeUsers))
+    (editor users)
   pure userSend
   where
     csToLines :: Maybe ChannelState -> [Text]
