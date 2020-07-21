@@ -29,7 +29,7 @@ import Data.Foldable
 import Data.Function (on)
 import Data.List (elemIndex, find, sortOn, partition)
 import qualified Data.List.NonEmpty as NE
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Monoid
 import qualified Data.Set as Set

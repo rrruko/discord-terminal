@@ -14,7 +14,7 @@ module Editor
 
 import Control.Lens.Operators
 import Control.Monad.Fix
-import qualified Data.Map as M
+import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Data.Text.Zipper
 import Discord.Types hiding (Event)
