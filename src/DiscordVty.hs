@@ -15,6 +15,7 @@ module DiscordVty
   , channelView
   ) where
 
+import Control.Applicative
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Lens
 import Control.Lens.Operators
@@ -103,8 +104,8 @@ awaitBothEvents
 awaitBothEvents a b = do
   aCurrent <- holdDyn Nothing (Just <$> a)
   bCurrent <- holdDyn Nothing (Just <$> b)
-  let both = (,) <$> aCurrent <*> bCurrent
-  pure $ updated both & fmapMaybe (uncurry (liftM2 (,)))
+  let both = liftA2 (,) aCurrent bCurrent
+  pure $ updated both & fmapMaybe (uncurry (liftA2 (,)))
 
 awaitBothEventsWith
   :: (Reflex t, MonadHold t m)
@@ -115,8 +116,8 @@ awaitBothEventsWith
 awaitBothEventsWith f a b = do
   aCurrent <- holdDyn Nothing (Just <$> a)
   bCurrent <- holdDyn Nothing (Just <$> b)
-  let both = (,) <$> aCurrent <*> bCurrent
-  pure $ updated both & fmapMaybe (uncurry (liftM2 f))
+  let both = liftA2 (,) aCurrent bCurrent
+  pure $ updated both & fmapMaybe (uncurry (liftA2 f))
 
 data DiscordInit = DiscordInit
   { _initGuilds :: AppState
@@ -130,7 +131,7 @@ runClient token = mainWidget mdo
   DiscordEvents discordEvent discordStartEvent <- setupDiscord token
   let guilds = discordStartEvent
         & fmapMaybe getGuildsEvent
-        & fmapMaybe (\g -> (,,) <$> Just g <*> firstGuild g <*> firstChannel g)
+        & fmapMaybe (\g -> liftA3 (,,) (Just g) (firstGuild g) (firstChannel g))
   let handle = discordStartEvent
         & fmapMaybe getHandleEvent
   discordInit <-
@@ -172,7 +173,7 @@ runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent
       currentChanId
       updatedAppState
       sendUserMessage
-  let newChanId = updated ((,) <$> currentGuildId <*> currentChanId)
+  let newChanId = updated (liftA2 (,) currentGuildId currentChanId)
   updatedAppState <- updateAppState handle newChanId guilds discordEvent
   (currentGuildId, currentChanId) <-
     accumulateGuildChannel
@@ -481,12 +482,12 @@ serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
       guilds
   let users = guildUsers currentGuild
   let currentGuild =
-        (\g gId -> (_guildsMap g) Map.! gId) <$> guilds <*> currentGuildId
+        liftA2 (\g gId -> (_guildsMap g) Map.! gId) guilds currentGuildId
   let chanState =
-        getChannelState
-          <$> (fmap _guildsMap guilds)
-          <*> currentGuildId
-          <*> currentChanId
+        liftA3 getChannelState
+          (fmap _guildsMap guilds)
+          currentGuildId
+          currentChanId
   let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
   performEvent (sendUserMessage
     <$> (sendEv & fmap (\(a,(b,c)) -> (a,c,b))))
