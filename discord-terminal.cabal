@@ -18,7 +18,7 @@ build-type:          Simple
 extra-source-files:  CHANGELOG.md
 
 library
-  exposed-modules:     DiscordVty, Editor
+  exposed-modules:     DiscordVty, Editor, Scrollable
   -- other-modules:
   -- other-extensions:
   build-depends:       base >=4.12 && <4.13
