@@ -164,8 +164,21 @@ runAppWithHandle
   -> Event t NewMessage
   -> VtyWidget t m ()
 runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent = mdo
-  currChanId <- serverWidget handle initGuildId initChanId updatedAppState sendUserMessage
+  (currChanId, newGuildId, newChannelId) <-
+    serverWidget
+      handle
+      currentGuildId
+      currentChanId
+      updatedAppState
+      sendUserMessage
   updatedAppState <- updateAppState handle currChanId guilds discordEvent
+  (currentGuildId, currentChanId) <-
+    accumulateGuildChannel
+      initGuildId
+      initChanId
+      newGuildId
+      newChannelId
+      updatedAppState
   pure ()
 
 sendUserMessage :: MonadIO m => (DiscordHandle, Text, ChannelId) -> m (Maybe RestCallErrorCode)
@@ -412,43 +425,36 @@ data ServerViewState t = ServerViewState
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
   => DiscordHandle
-  -> GuildId
-  -> ChannelId
+  -> Dynamic t GuildId
+  -> Dynamic t ChannelId
   -> Dynamic t AppState
   -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
-  -> VtyWidget t m (Event t (GuildId, ChannelId, Bool))
-serverWidget handle initGuildId initChanId guilds sendUserMessage = mdo
-    (newGuildId, (userSend, newChanId)) <-
-      serversView $ ServerViewState
-        currentGuildId
-        currentChanId
-        currentGuild
+  -> VtyWidget t m (Event t (GuildId, ChannelId, Bool), Event t GuildId, Event t ChannelId)
+serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
+  (newGuildId, (userSend, newChanId)) <-
+    serversView $ ServerViewState
+      currentGuildId
+      currentChanId
+      currentGuild
+      chanState
+      users
+      guilds
+  let users = guildUsers currentGuild
+  let currentGuild =
+        (\g gId -> (_guildsMap g) Map.! gId) <$> guilds <*> currentGuildId
+  let chanState =
+        getChannelState
+          <$> (fmap _guildsMap guilds)
+          <*> currentGuildId
+          <*> currentChanId
+  let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
+  performEvent (sendUserMessage
+    <$> (sendEv & fmap (\(a,(b,c)) -> (a,c,b))))
+  let isLoaded = fmap
+        (\case { Just (ChannelState { _messages = NotLoaded }) -> False; _ -> True })
         chanState
-        users
-        guilds
-    (currentGuildId, currentChanId) <-
-      accumulateGuildChannel
-        initGuildId
-        initChanId
-        newGuildId
-        newChanId
-        guilds
-    let users = guildUsers currentGuild
-    let currentGuild =
-          (\g gId -> (_guildsMap g) Map.! gId) <$> guilds <*> currentGuildId
-    let chanState =
-          getChannelState
-            <$> (fmap _guildsMap guilds)
-            <*> currentGuildId
-            <*> currentChanId
-    let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
-    performEvent (sendUserMessage
-      <$> (sendEv & fmap (\(a,(b,c)) -> (a,c,b))))
-    let isLoaded = fmap
-          (\case { Just (ChannelState { _messages = NotLoaded }) -> False; _ -> True })
-          chanState
-    let updatedGuildChanId = (,,) <$> currentGuildId <*> currentChanId <*> isLoaded
-    pure (updated updatedGuildChanId)
+  let updatedGuildChanId = (,,) <$> currentGuildId <*> currentChanId <*> isLoaded
+  pure (updated updatedGuildChanId, newGuildId, newChanId)
 
 serversView
   :: (MonadVtyApp t m, MonadNodeId m)
