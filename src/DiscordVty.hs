@@ -171,8 +171,8 @@ runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent
       currentChanId
       updatedAppState
       sendUserMessage
-  let currChanId = updated ((,) <$> currentGuildId <*> currentChanId)
-  updatedAppState <- updateAppState handle currChanId guilds discordEvent
+  let newChanId = updated ((,) <$> currentGuildId <*> currentChanId)
+  updatedAppState <- updateAppState handle newChanId guilds discordEvent
   (currentGuildId, currentChanId) <-
     accumulateGuildChannel
       initGuildId
@@ -195,24 +195,42 @@ updateAppState
   -> AppState
   -> Event t NewMessage
   -> VtyWidget t m (Dynamic t AppState)
-updateAppState handle currChanId guilds newMsg = mdo
-  currChanId' <- debounce 0.5 currChanId
-  let reqChannelMessages = requestChannelMessageUpdate currChanId' updatedAppStateDyn
+updateAppState handle newChanId guilds newMsg = mdo
+  messageUpdates <- getMessageUpdates handle newChanId updatedAppStateDyn newMsg
+  userUpdates <- getUserUpdates handle newChanId updatedAppStateDyn
+  updatedAppStateDyn <- foldDyn ($) guilds
+    (iterateEvent (mergeList [messageUpdates, userUpdates]))
+  pure updatedAppStateDyn
+
+getMessageUpdates
+  :: (MonadVtyApp t m)
+  => DiscordHandle
+  -> Event t (GuildId, ChannelId)
+  -> Dynamic t AppState
+  -> Event t NewMessage
+  -> VtyWidget t m (Event t (AppState -> AppState))
+getMessageUpdates handle newChanId updatedAppStateDyn newMsg = do
+  newChanId' <- debounce 0.5 newChanId
+  let reqChannelMessages = requestChannelMessageUpdate newChanId' updatedAppStateDyn
   let newCreatedMessages = getNewMessageContext (current updatedAppStateDyn) newMsg
-  newMessages <-
-    (performEventAsync
-      (fmap (uncurry (requestChannelMessages handle)) reqChannelMessages))
-  let appStateUpdates = iterateEvent $ fmap (fmap updateMessages) $
-        (mergeList [newMessages, newCreatedMessages])
-  guildChanged <- uniqEvent (fmap (\(a,_) -> a) currChanId)
-  reqGuildUsers <- debounce 0.5 guildChanged
+  newMessages <- performEventAsync
+    (fmap (uncurry (requestChannelMessages handle)) reqChannelMessages)
+  pure $ iterateEvent $ fmap (fmap updateMessages) $
+    (mergeList [newMessages, newCreatedMessages])
+
+getUserUpdates
+  :: (MonadVtyApp t m)
+  => DiscordHandle
+  -> Event t (GuildId, ChannelId)
+  -> Dynamic t AppState
+  -> VtyWidget t m (Event t (AppState -> AppState))
+getUserUpdates handle newChanId updatedAppStateDyn = do
+  newGuildId <- uniqEvent (fmap (\(a,_) -> a) newChanId)
+  reqGuildUsers <- debounce 0.5 newGuildId
   guildUsers <-
     (performEventAsync
       (fmap (requestGuildUsers handle) reqGuildUsers))
-  let guildUsersUpdates = uncurry updateUsers <$> guildUsers
-  updatedAppStateDyn <- foldDyn ($) guilds
-    (iterateEvent (mergeList [appStateUpdates, guildUsersUpdates]))
-  pure updatedAppStateDyn
+  pure (uncurry updateUsers <$> guildUsers)
 
 requestChannelMessageUpdate
   :: (Reflex t)
