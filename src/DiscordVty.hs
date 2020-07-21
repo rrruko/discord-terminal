@@ -164,13 +164,14 @@ runAppWithHandle
   -> Event t NewMessage
   -> VtyWidget t m ()
 runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent = mdo
-  (currChanId, newGuildId, newChannelId) <-
+  (newGuildId, newChannelId) <-
     serverWidget
       handle
       currentGuildId
       currentChanId
       updatedAppState
       sendUserMessage
+  let currChanId = updated ((,) <$> currentGuildId <*> currentChanId)
   updatedAppState <- updateAppState handle currChanId guilds discordEvent
   (currentGuildId, currentChanId) <-
     accumulateGuildChannel
@@ -190,20 +191,20 @@ sendUserMessage (handle, text, cId) = liftIO $
 updateAppState
   :: (MonadVtyApp t m)
   => DiscordHandle
-  -> Event t (GuildId, ChannelId, Bool)
+  -> Event t (GuildId, ChannelId)
   -> AppState
   -> Event t NewMessage
   -> VtyWidget t m (Dynamic t AppState)
 updateAppState handle currChanId guilds newMsg = mdo
-  reqChannelMessages <- debounce 0.5 currChanId
-    <&> fmapMaybe (\(a,b,c) -> guard (not c) *> Just (a,b))
+  currChanId' <- debounce 0.5 currChanId
+  let reqChannelMessages = requestChannelMessageUpdate currChanId' updatedAppStateDyn
   let newCreatedMessages = getNewMessageContext (current updatedAppStateDyn) newMsg
   newMessages <-
     (performEventAsync
       (fmap (uncurry (requestChannelMessages handle)) reqChannelMessages))
   let appStateUpdates = iterateEvent $ fmap (fmap updateMessages) $
         (mergeList [newMessages, newCreatedMessages])
-  guildChanged <- uniqEvent (fmap (\(a,_,_) -> a) currChanId)
+  guildChanged <- uniqEvent (fmap (\(a,_) -> a) currChanId)
   reqGuildUsers <- debounce 0.5 guildChanged
   guildUsers <-
     (performEventAsync
@@ -212,6 +213,26 @@ updateAppState handle currChanId guilds newMsg = mdo
   updatedAppStateDyn <- foldDyn ($) guilds
     (iterateEvent (mergeList [appStateUpdates, guildUsersUpdates]))
   pure updatedAppStateDyn
+
+requestChannelMessageUpdate
+  :: (Reflex t)
+  => Event t (GuildId, ChannelId)
+  -> Dynamic t AppState
+  -> Event t (GuildId, ChannelId)
+requestChannelMessageUpdate requestedChanId appState =
+  attachPromptlyDyn appState requestedChanId
+    & fmapMaybe (\(gs, (gId, cId)) ->
+          if loaded gs gId cId
+            then Nothing
+            else Just (gId, cId))
+
+loaded :: AppState -> GuildId -> ChannelId -> Bool
+loaded gs gId cId =
+  case msgs of
+    Just NotLoaded -> False
+    _ -> True
+  where
+    msgs = gs ^? guildsMap . ix gId . channels . ix cId . messages
 
 uniqEvent :: (Reflex t, MonadHold t m, Eq a) => Event t a -> m (Event t a)
 uniqEvent ev = do
@@ -429,7 +450,7 @@ serverWidget
   -> Dynamic t ChannelId
   -> Dynamic t AppState
   -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
-  -> VtyWidget t m (Event t (GuildId, ChannelId, Bool), Event t GuildId, Event t ChannelId)
+  -> VtyWidget t m (Event t GuildId, Event t ChannelId)
 serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
   (newGuildId, (userSend, newChanId)) <-
     serversView $ ServerViewState
@@ -450,11 +471,7 @@ serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
   let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
   performEvent (sendUserMessage
     <$> (sendEv & fmap (\(a,(b,c)) -> (a,c,b))))
-  let isLoaded = fmap
-        (\case { Just (ChannelState { _messages = NotLoaded }) -> False; _ -> True })
-        chanState
-  let updatedGuildChanId = (,,) <$> currentGuildId <*> currentChanId <*> isLoaded
-  pure (updated updatedGuildChanId, newGuildId, newChanId)
+  pure (newGuildId, newChanId)
 
 serversView
   :: (MonadVtyApp t m, MonadNodeId m)
