@@ -123,7 +123,7 @@ editWidget initValue = do
   submitPost <- key V.KEnter
   mention <- fmap (Mention <$) (keyCombo (V.KChar 'a', [V.MCtrl]))
   textInp <-
-    textInput def
+    textInput' def
       { _textInputConfig_initialValue = fromText initValue
       }
   pure
@@ -131,3 +131,43 @@ editWidget initValue = do
       [ BeginMention <$> tag (current (_textInput_value textInp)) mention
       , SubmitPost <$> tag (current (_textInput_value textInp)) submitPost
       ])
+
+-- This is just the reflex-vty textInput widget with tab inputs filtered out.
+-- I'm using tab for navigation and I don't want to worry about keeping my
+-- input widget unfocused when the user is trying to tab out.
+textInput'
+  :: (Reflex t, MonadHold t m, MonadFix m)
+  => TextInputConfig t
+  -> VtyWidget t m (TextInput t)
+textInput' cfg = do
+  i <- input <&> ffilter (\ev -> ev /= V.EvKey (V.KChar '\t') [])
+  f <- focus
+  dh <- displayHeight
+  dw <- displayWidth
+  rec v <- foldDyn ($) (_textInputConfig_initialValue cfg) $ mergeWith (.)
+        [ uncurry (updateTextZipper (_textInputConfig_tabWidth cfg)) <$> attach (current dh) i
+        , _textInputConfig_modify cfg
+        , let displayInfo = (,) <$> current rows <*> scrollTop
+          in ffor (attach displayInfo click) $ \((dl, st), MouseDown _ (mx, my) _) ->
+            goToDisplayLinePosition mx (st + my) dl
+        ]
+      click <- mouseDown V.BLeft
+      let cursorAttrs = ffor f $ \x -> if x then cursorAttributes else V.defAttr
+      let rows = (\w s c -> displayLines w V.defAttr c s)
+            <$> dw
+            <*> (mapZipper <$> _textInputConfig_display cfg <*> v)
+            <*> cursorAttrs
+          img = images . _displayLines_spans <$> rows
+      y <- holdUniqDyn $ _displayLines_cursorY <$> rows
+      let newScrollTop :: Int -> (Int, Int) -> Int
+          newScrollTop st (h, cursorY)
+            | cursorY < st = cursorY
+            | cursorY >= st + h = cursorY - h + 1
+            | otherwise = st
+      let hy = attachWith newScrollTop scrollTop $ updated $ zipDyn dh y
+      scrollTop <- hold 0 hy
+      tellImages $ (\imgs st -> (:[]) . V.vertCat $ drop st imgs) <$> current img <*> scrollTop
+  return $ TextInput
+    { _textInput_value = value <$> v
+    , _textInput_lines = length . _displayLines_spans <$> rows
+    }
