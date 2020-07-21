@@ -55,7 +55,7 @@ editor
   => Dynamic t (M.Map T.Text UserId)
   -> VtyWidget t m (Event t T.Text)
 editor users = mdo
-    let network = ffor2 editorState users editorNetwork
+    let network = ffor editorState (\es -> editorNetwork es users)
     editorUpdate <- switchHold never =<< networkView network
     editorState <- foldDyn updateEditor initialEditorState editorUpdate
     pure (fforMaybe editorUpdate
@@ -75,7 +75,7 @@ editor users = mdo
 editorNetwork
   :: forall t m. EditorConstraints t m
   => EditorState
-  -> M.Map T.Text UserId
+  -> Dynamic t (M.Map T.Text UserId)
   -> VtyWidget t m (Event t EditorCommand)
 editorNetwork s users = case state s of
   Mention -> mentionWidget users
@@ -83,7 +83,7 @@ editorNetwork s users = case state s of
 
 mentionWidget
   :: forall t m. EditorConstraints t m
-  => M.Map T.Text UserId
+  => Dynamic t (M.Map T.Text UserId)
   -> VtyWidget t m (Event t EditorCommand)
 mentionWidget users = do
   submitMention <- key V.KEnter
@@ -94,7 +94,7 @@ mentionWidget users = do
       fixed 1 (textInput def)
   let
     mentionedUser = tag (current (_textInput_value textInp)) submitMention
-    mention = fmapMaybe (\name -> users M.!? name) mentionedUser
+    mention = fmapMaybe (uncurry (M.!?)) (attach (current users) mentionedUser)
   pure
     (leftmost
       [ SubmitMention <$> mention
@@ -104,13 +104,13 @@ mentionWidget users = do
 userNameChoices
   :: forall t m. EditorConstraints t m
   => Dynamic t T.Text
-  -> M.Map T.Text UserId
+  -> Dynamic t (M.Map T.Text UserId)
   -> VtyWidget t m ()
 userNameChoices prefix names =
   text $ current $
-    ffor prefix (\p ->
+    ffor2 prefix names (\p n ->
       let
-        nameList = M.keys names
+        nameList = M.keys n
         choices = filter (p `T.isPrefixOf`) nameList
       in
         (T.intercalate ", " choices))
