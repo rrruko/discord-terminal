@@ -94,12 +94,35 @@ app =
     (botToken : _) -> runClient (pack botToken)
     _ -> putStrLn "No token supplied."
 
-bothEvents :: (Reflex t, MonadHold t m) => Event t a -> Event t b -> m (Event t (a, b))
-bothEvents a b = do
+awaitBothEvents
+  :: (Reflex t, MonadHold t m)
+  => Event t a
+  -> Event t b
+  -> m (Event t (a, b))
+awaitBothEvents a b = do
   aCurrent <- holdDyn Nothing (Just <$> a)
   bCurrent <- holdDyn Nothing (Just <$> b)
   let both = (,) <$> aCurrent <*> bCurrent
   pure $ updated both & fmapMaybe (uncurry (liftM2 (,)))
+
+awaitBothEventsWith
+  :: (Reflex t, MonadHold t m)
+  => (a -> b -> c)
+  -> Event t a
+  -> Event t b
+  -> m (Event t c)
+awaitBothEventsWith f a b = do
+  aCurrent <- holdDyn Nothing (Just <$> a)
+  bCurrent <- holdDyn Nothing (Just <$> b)
+  let both = (,) <$> aCurrent <*> bCurrent
+  pure $ updated both & fmapMaybe (uncurry (liftM2 f))
+
+data DiscordInit = DiscordInit
+  { _initGuilds :: AppState
+  , _initGuildId :: GuildId
+  , _initChannelId :: ChannelId
+  , _initHandle :: DiscordHandle
+  }
 
 runClient :: Text -> IO ()
 runClient token = mainWidget mdo
@@ -109,11 +132,14 @@ runClient token = mainWidget mdo
         & fmapMaybe (\g -> (,,) <$> Just g <*> firstGuild g <*> firstChannel g)
   let handle = discordStartEvent
         & fmapMaybe getHandleEvent
-  guildsAndHandle <- bothEvents guilds handle
+  discordInit <-
+    awaitBothEventsWith
+      (\(a,b,c) d -> DiscordInit a b c d)
+      guilds
+      handle
   networkHold
     (text "Acquiring guilds and handle...")
-    (ffor guildsAndHandle (\((g, gId, cId), h) -> do
-      runAppWithHandle g gId cId h discordEvent))
+    (ffor discordInit (\gh -> runAppWithHandle gh discordEvent))
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -134,13 +160,10 @@ firstChannel g = do
 
 runAppWithHandle
   :: (MonadVtyApp t m, MonadNodeId m)
-  => AppState
-  -> GuildId
-  -> ChannelId
-  -> DiscordHandle
+  => DiscordInit
   -> Event t NewMessage
   -> VtyWidget t m ()
-runAppWithHandle guilds initGuildId initChanId handle discordEvent = mdo
+runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent = mdo
   currChanId <- serverWidget handle initGuildId initChanId updatedAppState sendUserMessage
   updatedAppState <- updateAppState handle currChanId guilds discordEvent
   pure ()
@@ -175,7 +198,7 @@ updateAppState handle currChanId guilds newMsg = mdo
   let guildUsersUpdates = uncurry updateUsers <$> guildUsers
   updatedAppStateDyn <- foldDyn ($) guilds
     (iterateEvent (mergeList [appStateUpdates, guildUsersUpdates]))
-  pure (updatedAppStateDyn)
+  pure updatedAppStateDyn
 
 uniqEvent :: (Reflex t, MonadHold t m, Eq a) => Event t a -> m (Event t a)
 uniqEvent ev = do
@@ -377,6 +400,15 @@ channelNamePretty c = case c of
   _ ->
     "Unknown"
 
+data ServerViewState t = ServerViewState
+  { _serverViewGId :: Dynamic t GuildId
+  , _serverViewCId :: Dynamic t ChannelId
+  , _serverViewGuild :: Dynamic t GuildState
+  , _serverViewChannel :: Dynamic t (Maybe ChannelState)
+  , _serverViewUsers :: Dynamic t (Map.Map Text UserId)
+  , _serverViewGuilds :: Dynamic t AppState
+  }
+
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
   => DiscordHandle
@@ -385,24 +417,15 @@ serverWidget
   -> Dynamic t AppState
   -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
   -> VtyWidget t m (Event t (GuildId, ChannelId, Bool))
-serverWidget handle initGuildId initChanId guilds sendUserMessage = do
-  inp <- key V.KEsc
-  tog <- toggle False inp
-  nav <- tabNavigation
-  navTog <- toggle True nav
-  let foc = fmap (bool (False, True) (True, False)) navTog
-  mdo
+serverWidget handle initGuildId initChanId guilds sendUserMessage = mdo
     (newGuildId, (userSend, newChanId)) <-
-      splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
-        (serversView currentGuildId (fmap _guildsMap guilds))
-        (splitH
-          (pure (subtract 12))
-          foc
-          (boxTitle (constant def) " Channel view "
-            (channelView chanState users))
-          (boxTitle (constant def) " Channels "
-            (channelsView currentChanId (fmap DiscordVty._channels currentGuild))))
-
+      serversView $ ServerViewState
+        currentGuildId
+        currentChanId
+        currentGuild
+        chanState
+        users
+        guilds
     (currentGuildId, currentChanId) <-
       accumulateGuildChannel
         initGuildId
@@ -410,30 +433,61 @@ serverWidget handle initGuildId initChanId guilds sendUserMessage = do
         newGuildId
         newChanId
         guilds
-
-    let users =
-          currentGuild
-            <&> _members
-            <&> (\uToM -> Map.mapKeys (\uId -> userName (memberUser (uToM Map.! uId))) uToM)
-            <&> Map.map (\mem -> userId (memberUser mem))
-
+    let users = guildUsers currentGuild
     let currentGuild =
           (\g gId -> (_guildsMap g) Map.! gId) <$> guilds <*> currentGuildId
     let chanState =
-          (\s gId cId -> getChannelState s gId cId)
+          getChannelState
             <$> (fmap _guildsMap guilds)
             <*> currentGuildId
             <*> currentChanId
-
     let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
     performEvent (sendUserMessage
       <$> (sendEv & fmap (\(a,(b,c)) -> (a,c,b))))
-
     let isLoaded = fmap
-          (\case { Just (ChannelState _ _ _ _ _ NotLoaded) -> False; _ -> True })
+          (\case { Just (ChannelState { _messages = NotLoaded }) -> False; _ -> True })
           chanState
     let updatedGuildChanId = (,,) <$> currentGuildId <*> currentChanId <*> isLoaded
     pure (updated updatedGuildChanId)
+
+serversView
+  :: (MonadVtyApp t m, MonadNodeId m)
+  => ServerViewState t
+  -> VtyWidget t m (Event t GuildId, (Event t T.Text, Event t ChannelId))
+serversView sws = do
+  inp <- key V.KEsc
+  tog <- toggle False inp
+  splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
+    (serverList (_serverViewGId sws) (fmap _guildsMap (_serverViewGuilds sws)))
+    (serverView sws)
+
+serverView
+  :: (MonadVtyApp t m, MonadNodeId m)
+  => ServerViewState t
+  -> VtyWidget t m (Event t T.Text, Event t ChannelId)
+serverView sws = do
+  nav <- tabNavigation
+  navTog <- toggle True nav
+  let foc = fmap (bool (False, True) (True, False)) navTog
+  (splitH
+    (pure (subtract 12))
+    foc
+    (boxTitle (constant def) " Channel view "
+      (channelView
+        (_serverViewChannel sws)
+        (_serverViewUsers sws)))
+    (boxTitle (constant def) " Channels "
+      (channelsView
+        (_serverViewCId sws)
+        (fmap DiscordVty._channels
+          (_serverViewGuild sws)))))
+
+guildUsers :: Reflex t => Dynamic t GuildState -> Dynamic t (Map.Map Text UserId)
+guildUsers =
+  fmap
+    (Map.map (\mem -> userId (memberUser mem))
+      . (\uToM -> Map.mapKeys (\uId -> userName (memberUser (uToM Map.! uId))) uToM)
+      . _members)
 
 accumulateGuildChannel
   :: (Reflex t, MonadHold t m, MonadFix m)
@@ -478,12 +532,12 @@ highlighted = V.withStyle V.defAttr V.standout
 highlight isFocused =
   RichTextConfig (current isFocused <&> bool normal highlighted)
 
-serversView
+serverList
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
   => Dynamic t GuildId
   -> Dynamic t (Map.Map GuildId GuildState)
   -> VtyWidget t m (Event t GuildId)
-serversView selected guilds = join $ fmap (switchHold never) $ networkView $
+serverList selected guilds = join $ fmap (switchHold never) $ networkView $
   ffor2 selected guilds \s g ->
     optionList s g Orientation_Row const \gId guild ->
       stretch do
