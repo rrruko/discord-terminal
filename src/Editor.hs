@@ -94,7 +94,11 @@ mentionWidget users = do
       fixed 1 (textInput def)
   let
     mentionedUser = tag (current (_textInput_value textInp)) submitMention
-    mention = fmapMaybe (uncurry (M.!?)) (attach (current users) mentionedUser)
+    mention = fmapMaybe lookupUser (attach (current users) mentionedUser)
+    lookupUser (users, name) =
+      case filter (name `T.isPrefixOf`) (M.keys users) of
+        [only] -> users M.!? only
+        _ -> Nothing
   pure
     (leftmost
       [ SubmitMention <$> mention
