@@ -30,13 +30,14 @@ import Data.Function (on)
 import Data.List (elemIndex, find, sortOn, partition)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
-import Data.Maybe
+import Data.Maybe (fromMaybe, isJust)
 import Data.Monoid
 import qualified Data.Set as Set
 import Data.Text (Text, intercalate, isPrefixOf, unlines, pack, toLower)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.Text.Zipper
+import Data.Witherable
 import Discord
 import qualified Discord.Requests as R
 import Discord.Types hiding (Event)
@@ -259,7 +260,7 @@ uniqEvent ev = do
         (\last curr -> if last == Just curr then Nothing else Just curr)
         (current latest)
         ev
-  pure (fmapMaybe id fireWhenNew)
+  pure (catMaybes fireWhenNew)
 
 updateUsers :: GuildId -> [GuildMember] -> AppState -> AppState
 updateUsers gId newMembers appState =
@@ -284,7 +285,7 @@ getNewMessageContext
   -> Event t (GuildId, ChannelId, [AppMessage])
 getNewMessageContext guilds newMsg = do
   let e = attach guilds newMsg
-  fmapMaybe id $ ffor e (\(gs, m) -> do
+  catMaybes $ ffor e (\(gs, m) -> do
     gId <- lookupChannelGuild (newMessageChannelId m) gs
     pure (gId, newMessageChannelId m, [newMessageContent m]))
 
@@ -625,7 +626,7 @@ optionList selected m orientation sortKey pretty = do
   up <- keys [V.KUp, V.KChar 'k']
   down <- keys [V.KDown, V.KChar 'j']
   let selIndex = elemIndex selected (fmap fst (sortOn (uncurry sortKey) (Map.toList m)))
-  fmapMaybe id <$> runLayout
+  catMaybes <$> runLayout
     (constDyn orientation)
     (maybe 0 id selIndex)
     (leftmost
