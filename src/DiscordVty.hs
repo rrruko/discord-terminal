@@ -23,6 +23,7 @@ import Control.Monad.Fix
 import Control.Monad.IO.Class
 import Control.Monad.Reader
 import Data.Bool
+import Data.Foldable
 import Data.List (elemIndex, find, sortOn)
 import Data.Map.Strict ((!?))
 import qualified Data.Map.Strict as Map
@@ -304,10 +305,6 @@ requestChannelMessages handle gId cId callback = liftIO $
   restCall handle (R.GetChannelMessages cId (10, R.LatestMessages)) >>= \case
     Left _ -> pure ()
     Right msgs -> do
-      let toAppMessage m = AppMessage
-            (userName (messageAuthor m))
-            (messageText m)
-            (messageTimestamp m)
       let msgs' = fmap toAppMessage msgs
       callback (gId, cId, msgs')
 
@@ -316,9 +313,31 @@ handleDiscordEvent ev callback = liftIO $ do
   case ev of
     MessageCreate msg -> callback $
       NewMessage
-        (AppMessage (userName $ messageAuthor msg) (messageText msg) (messageTimestamp msg))
+        (toAppMessage msg)
         (messageChannel msg)
     _ -> pure ()
+
+toAppMessage :: Message -> AppMessage
+toAppMessage msg =
+  AppMessage
+    (userName (messageAuthor msg))
+    (prettyMessageText msg)
+    (messageTimestamp msg)
+
+prettyMessageText :: Message -> Text
+prettyMessageText msg =
+  let
+    attachments = fmap attachmentUrl (messageAttachments msg)
+    embeds = fmapMaybe embedUrl (messageEmbeds msg)
+  in
+    fold
+      [ messageText msg
+      , "\n"
+      , if not (null attachments) then "Attachments:\n" else ""
+      , T.unlines attachments
+      , if not (null embeds) then "Embeds:\n" else ""
+      , T.unlines embeds
+      ]
 
 data NewMessage = NewMessage
   { newMessageContent :: AppMessage
