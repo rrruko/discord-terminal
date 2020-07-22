@@ -624,7 +624,7 @@ optionList selected m orientation sortKey pretty = do
   makeList m' =
     fmap
       (updated . fmap getFirst . mconcat)
-      (forM ((sortOn (uncurry sortKey) (Map.toList m'))) (uncurry pretty))
+      (forM (sortOn (uncurry sortKey) (Map.toList m')) (uncurry pretty))
 
 channelView
   :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
