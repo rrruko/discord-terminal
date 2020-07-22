@@ -181,8 +181,13 @@ runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent
       updatedAppState
   pure ()
 
-sendUserMessage :: MonadIO m => (DiscordHandle, Text, ChannelId) -> m (Maybe RestCallErrorCode)
-sendUserMessage (handle, text, cId) = liftIO $
+sendUserMessage
+  :: MonadIO m
+  => DiscordHandle
+  -> ChannelId
+  -> Text
+  -> m (Maybe RestCallErrorCode)
+sendUserMessage handle cId text = liftIO $
   restCall handle (R.CreateMessage cId text) >>= \case
     Left errCode -> pure (Just errCode)
     Right _ -> pure Nothing
@@ -469,7 +474,7 @@ serverWidget
   -> Dynamic t GuildId
   -> Dynamic t ChannelId
   -> Dynamic t AppState
-  -> ((DiscordHandle, Text, ChannelId) -> ReaderT (VtyWidgetCtx t) (Performable m) (Maybe RestCallErrorCode))
+  -> (DiscordHandle -> ChannelId -> Text -> Performable (VtyWidget t m) (Maybe RestCallErrorCode))
   -> VtyWidget t m (Event t GuildId, Event t ChannelId)
 serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
   (newGuildId, (userSend, newChanId)) <-
@@ -481,16 +486,17 @@ serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
       users
       guilds
   let users = guildUsers currentGuild
-  let currentGuild =
-        liftA2 (\g gId -> _guildsMap g Map.! gId) guilds currentGuildId
+  let currentGuild = ffor2 (fmap _guildsMap guilds) currentGuildId (Map.!)
   let chanState =
         liftA3 getChannelState
           (fmap _guildsMap guilds)
           currentGuildId
           currentChanId
-  let sendEv = attach (pure handle) (attach (current currentChanId) userSend)
-  performEvent (sendUserMessage
-    <$> (sendEv & fmap (\(a,(b,c)) -> (a,c,b))))
+  let sendEv =
+        sendUserMessage handle
+          <$> current currentChanId
+          <@> userSend
+  performEvent sendEv
   pure (newGuildId, newChanId)
 
 serversView
