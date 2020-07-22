@@ -20,8 +20,6 @@ import Discord.Types hiding (Event)
 import Reflex
 import Reflex.Network
 import Reflex.Vty
-import Reflex.Vty.Widget
-import Reflex.Vty.Widget.Input
 import qualified Graphics.Vty as V
 
 data EditorMode
@@ -63,11 +61,11 @@ editor users = mdo
         _ -> Nothing)
   where
   initialEditorState = EditorState Edit mempty
-  updateEditor x (EditorState s c) =
+  updateEditor x (EditorState _ c) =
     case x of
       BeginMention persistedContent -> EditorState Mention persistedContent
       SubmitMention mention -> EditorState Edit (c <> formatMention mention)
-      SubmitPost post -> EditorState Edit mempty
+      SubmitPost _ -> EditorState Edit mempty
       QuitMention -> EditorState Edit c
   formatMention ident = "<@" <> T.pack (show ident) <> ">"
 
@@ -94,9 +92,9 @@ mentionWidget users = do
   let
     mentionedUser = tag (current (_textInput_value textInp)) submitMention
     mention = fmapMaybe lookupUser (attach (current users) mentionedUser)
-    lookupUser (users, name) =
-      case filter (name `T.isPrefixOf`) (M.keys users) of
-        [only] -> users M.!? only
+    lookupUser (us, name) =
+      case filter (name `T.isPrefixOf`) (M.keys us) of
+        [only] -> us M.!? only
         _ -> Nothing
   pure
     (leftmost

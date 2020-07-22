@@ -16,29 +16,20 @@ module DiscordVty
   ) where
 
 import Control.Applicative
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Lens
-import Control.Lens.Operators
-import Control.Monad (when, void)
+import Control.Monad (void)
 import Control.Monad.Fix
 import Control.Monad.IO.Class
 import Control.Monad.Reader
-import Data.Bifunctor
-import Data.Bitraversable
 import Data.Bool
-import Data.Foldable
-import Data.Function (on)
-import Data.List (elemIndex, find, sortOn, partition)
-import qualified Data.List.NonEmpty as NE
+import Data.List (elemIndex, find, sortOn)
 import Data.Map.Strict ((!?))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Monoid
-import qualified Data.Set as Set
-import Data.Text (Text, intercalate, isPrefixOf, unlines, pack, toLower)
+import Data.Text (Text, intercalate, pack)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
-import Data.Text.Zipper
 import Data.Witherable
 import Discord
 import qualified Discord.Requests as R
@@ -46,10 +37,8 @@ import Discord.Types hiding (Event)
 import qualified Discord.Types
 import qualified Graphics.Vty as V
 import Reflex
-import Reflex.Pure
 import Reflex.Network
 import Reflex.Vty
-import Reflex.Vty.Widget
 import System.Environment
 
 import Editor (editor)
@@ -113,8 +102,8 @@ awaitBothEventsWith
 awaitBothEventsWith f a b = do
   aCurrent <- holdDyn Nothing (Just <$> a)
   bCurrent <- holdDyn Nothing (Just <$> b)
-  let both = liftA2 (,) aCurrent bCurrent
-  pure $ updated both & fmapMaybe (uncurry (liftA2 f))
+  let bothEvents = liftA2 (,) aCurrent bCurrent
+  pure $ updated bothEvents & fmapMaybe (uncurry (liftA2 f))
 
 data DiscordInit = DiscordInit
   { _initGuilds :: AppState
@@ -136,9 +125,9 @@ runClient token = mainWidget mdo
       (\(a,b,c) d -> DiscordInit a b c d)
       guilds
       handle
-  networkHold
+  void (networkHold
     (text "Acquiring guilds and handle...")
-    (ffor discordInit (`runAppWithHandle` discordEvent))
+    (ffor discordInit (`runAppWithHandle` discordEvent)))
   inp <- input
   pure $ fforMaybe inp $ \case
     V.EvKey (V.KChar 'c') [V.MCtrl] -> Just ()
@@ -153,8 +142,7 @@ firstGuild g = minKey (_guildsMap g)
 firstChannel :: AppState -> Maybe ChannelId
 firstChannel g = do
   firstGId <- firstGuild g
-  let firstGuild = _guildsMap g !? firstGId
-  chans <- fmap DiscordVty._channels firstGuild
+  chans <- fmap DiscordVty._channels (_guildsMap g !? firstGId)
   minKey chans
 
 runAppWithHandle
@@ -177,7 +165,6 @@ runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent
       initChanId
       newGuildId
       newChannelId
-      updatedAppState
   pure ()
 
 sendUserMessage
@@ -186,8 +173,8 @@ sendUserMessage
   -> ChannelId
   -> Text
   -> m (Maybe RestCallErrorCode)
-sendUserMessage handle cId text = liftIO $
-  restCall handle (R.CreateMessage cId text) >>= \case
+sendUserMessage handle cId txt = liftIO $
+  restCall handle (R.CreateMessage cId txt) >>= \case
     Left errCode -> pure (Just errCode)
     Right _ -> pure Nothing
 
@@ -200,7 +187,7 @@ updateAppState
   -> VtyWidget t m (Dynamic t AppState)
 updateAppState handle newChanId guilds newMsg = mdo
   messageUpdates <- getMessageUpdates handle newChanId updatedAppStateDyn newMsg
-  userUpdates <- getUserUpdates handle newChanId updatedAppStateDyn
+  userUpdates <- getUserUpdates handle newChanId
   updatedAppStateDyn <- foldDyn ($) guilds
     (iterateEvent (mergeList [messageUpdates, userUpdates]))
   pure updatedAppStateDyn
@@ -225,14 +212,13 @@ getUserUpdates
   :: (MonadVtyApp t m)
   => DiscordHandle
   -> Event t (GuildId, ChannelId)
-  -> Dynamic t AppState
   -> VtyWidget t m (Event t (AppState -> AppState))
-getUserUpdates handle newChanId updatedAppStateDyn = do
+getUserUpdates handle newChanId = do
   newGuildId <- uniqEvent (fmap fst newChanId)
   reqGuildUsers <- debounce 0.5 newGuildId
-  guildUsers <- performEventAsync
+  users <- performEventAsync
     (fmap (requestGuildUsers handle) reqGuildUsers)
-  pure (uncurry updateUsers <$> guildUsers)
+  pure (uncurry updateUsers <$> users)
 
 requestChannelMessageUpdate
   :: (Reflex t)
@@ -258,7 +244,7 @@ uniqEvent :: (Reflex t, MonadHold t m, Eq a) => Event t a -> m (Event t a)
 uniqEvent ev = do
   latest <- holdDyn Nothing (fmap Just ev)
   let fireWhenNew = attachWith
-        (\last curr -> if last == Just curr then Nothing else Just curr)
+        (\prev curr -> if prev == Just curr then Nothing else Just curr)
         (current latest)
         ev
   pure (catMaybes fireWhenNew)
@@ -276,7 +262,7 @@ requestGuildUsers
   -> m ()
 requestGuildUsers handle gId callback = liftIO do
   restCall handle (R.ListGuildMembers gId (R.GuildMembersTiming (Just 100) Nothing)) >>= \case
-    Left errCode -> pure ()
+    Left _ -> pure ()
     Right users -> callback (gId, users)
 
 getNewMessageContext
@@ -305,7 +291,7 @@ updateMessages (gId, cId, msg) appState =
 lookupChannelGuild :: ChannelId -> AppState -> Maybe GuildId
 lookupChannelGuild cId guilds = do
   let gs = Map.toList (_guildsMap guilds)
-  fst <$> find (\(_, gs) -> isJust $ Map.lookup cId (DiscordVty._channels gs)) gs
+  fst <$> find (\(_, g) -> isJust $ Map.lookup cId (DiscordVty._channels g)) gs
 
 requestChannelMessages
   :: MonadIO m
@@ -316,7 +302,7 @@ requestChannelMessages
   -> m ()
 requestChannelMessages handle gId cId callback = liftIO $
   restCall handle (R.GetChannelMessages cId (10, R.LatestMessages)) >>= \case
-    Left errCode -> pure ()
+    Left _ -> pure ()
     Right msgs -> do
       let toAppMessage m = AppMessage
             (userName (messageAuthor m))
@@ -325,10 +311,8 @@ requestChannelMessages handle gId cId callback = liftIO $
       let msgs' = fmap toAppMessage msgs
       callback (gId, cId, msgs')
 
-handleDiscordEvent
-  :: MonadIO m
-  => DiscordHandle -> DiscordEvent -> (NewMessage -> IO ()) -> m ()
-handleDiscordEvent handle ev callback = liftIO $ do
+handleDiscordEvent :: MonadIO m => DiscordEvent -> (NewMessage -> IO ()) -> m ()
+handleDiscordEvent ev callback = liftIO $ do
   case ev of
     MessageCreate msg -> callback $
       NewMessage
@@ -347,7 +331,7 @@ handleOnStartEvent
 handleOnStartEvent handle callback = liftIO $ do
   callback (DiscordHandleEvent handle)
   restCall handle R.GetCurrentUserGuilds >>= \case
-    Left errCode -> pure ()
+    Left _ -> pure ()
     Right guilds -> do
       m <- getGuildsMap handle guilds
       callback (DiscordGuildsEvent (AppState m))
@@ -360,11 +344,11 @@ toChannelMap chans =
     ChannelState
       (channelNamePretty c)
       (channelId c)
-      (channelPosition' c)
+      (getChannelPosition c)
       (channelParentId c)
       (c & \case { ChannelGuildCategory {} -> True; _ -> False })
       NotLoaded
-  channelPosition' c = case c of
+  getChannelPosition c = case c of
     ChannelText {} -> channelPosition c
     ChannelNews {} -> channelPosition c
     ChannelStorePage {} -> channelPosition c
@@ -380,9 +364,11 @@ getGuildsMap
 getGuildsMap handle guilds = do
   chans <- forM guilds \g ->
     restCall handle (R.GetGuildChannels (partialGuildId g)) >>= \case
-      Left errCode -> pure (partialGuildId g, (partialGuildName g, []))
+      Left _ -> pure (partialGuildId g, (partialGuildName g, []))
       Right chans -> pure (partialGuildId g, (partialGuildName g, chans))
-  let channelMaps = fmap (fmap toChannelMap) (Map.fromList chans)
+  let channelMaps = fmap
+        (fmap (toChannelMap . Prelude.filter isValidChannel))
+        (Map.fromList chans)
   pure (fmap toGuildState channelMaps)
   where
   toGuildState (name, chans) = GuildState name chans mempty
@@ -392,7 +378,7 @@ getGuildsMap handle guilds = do
     ChannelGuildCategory {} -> True
     _ -> False
 
-type TriggerDiscordEvent = (DiscordHandle, DiscordEvent) -> IO ()
+type TriggerDiscordEvent = DiscordEvent -> IO ()
 type OnStartEvent = DiscordHandle -> IO ()
 
 spawnDiscord
@@ -402,7 +388,7 @@ spawnDiscord botToken triggerDiscordEvent onStartEvent callback =
   liftIO $ void $ forkIO $ do
     err <- runDiscord $ def
              { discordToken = botToken
-             , discordOnEvent = curry triggerDiscordEvent
+             , discordOnEvent = const triggerDiscordEvent
              , discordOnStart = onStartEvent
              }
     callback err
@@ -434,9 +420,9 @@ setupDiscord token = do
   (discordEvent, triggerDiscordEvent) <- newTriggerEvent
   (discordStartEvent, onStartEvent) <- newTriggerEvent
   start <- getPostBuild
-  performEventAsync
-    (spawnDiscord token triggerDiscordEvent onStartEvent <$ start)
-  ev <- performEventAsync (fmap (uncurry handleDiscordEvent) discordEvent)
+  void (performEventAsync
+    (spawnDiscord token triggerDiscordEvent onStartEvent <$ start))
+  ev <- performEventAsync (fmap handleDiscordEvent discordEvent)
   startEv <- performEventAsync (fmap handleOnStartEvent discordStartEvent)
   pure (DiscordEvents ev startEv)
 
@@ -471,7 +457,7 @@ serverWidget
   -> Dynamic t AppState
   -> (ChannelId -> Text -> Performable (VtyWidget t m) x)
   -> VtyWidget t m (Event t GuildId, Event t ChannelId)
-serverWidget currentGuildId currentChanId guilds sendUserMessage = do
+serverWidget currentGuildId currentChanId guilds sendMsg = do
   let currentGuild = ffor2 (fmap _guildsMap guilds) currentGuildId (Map.!)
   let chanState =
         liftA3 getChannelState
@@ -488,10 +474,10 @@ serverWidget currentGuildId currentChanId guilds sendUserMessage = do
       users
       guilds
   let sendEv =
-        sendUserMessage
+        sendMsg
           <$> current currentChanId
           <@> userSend
-  performEvent sendEv
+  void (performEvent sendEv)
   pure (newGuildId, newChanId)
 
 serversView
@@ -539,9 +525,8 @@ accumulateGuildChannel
   -> ChannelId
   -> Event t GuildId
   -> Event t ChannelId
-  -> Dynamic t AppState
   -> m (Dynamic t GuildId, Dynamic t ChannelId)
-accumulateGuildChannel initGuildId initChanId newGuildId newChanId guilds = do
+accumulateGuildChannel initGuildId initChanId newGuildId newChanId = do
   currentGuildId <- foldDyn const initGuildId newGuildId
   selectedChannels <-
     foldDyn
@@ -552,15 +537,6 @@ accumulateGuildChannel initGuildId initChanId newGuildId newChanId guilds = do
   updatedChanId <- foldDyn const initChanId newChanId
   let currentChanId = ffor2 updatedChanId savedChanId fromMaybe
   pure (currentGuildId, currentChanId)
-
-elemAt' :: Int -> Map.Map a b -> Maybe (a, b)
-elemAt' n m =
-  let
-    rest = snd (Map.splitAt n m)
-  in
-    if not (null rest)
-      then Just (Map.elemAt 0 rest)
-      else Nothing
 
 getChannelState
   :: Map.Map GuildId GuildState
@@ -598,20 +574,20 @@ channelList
   => Dynamic t ChannelId
   -> Dynamic t (Map.Map ChannelId ChannelState)
   -> VtyWidget t m (Event t ChannelId)
-channelList selected channels = do
+channelList selected chans = do
   e <- networkView $
-    ffor2 selected channels \s c ->
-      optionList s c Orientation_Column (key c) \cId channel ->
+    ffor2 selected chans \s c ->
+      optionList s c Orientation_Column (channelKey c) \cId channel ->
         fixed 1 do
           f <- focus
           richText (highlight f) (pure (_channelName' channel))
           pure (bool (First Nothing) (First $ Just cId) <$> f)
   switchHold never e
   where
-    key channels = \_ v -> sortKey (Map.elems channels) v
+    channelKey cs _ v = channelSortKey (Map.elems cs) v
 
-sortKey :: [ChannelState] -> ChannelState -> (Maybe Integer, Maybe Integer)
-sortKey chans this =
+channelSortKey :: [ChannelState] -> ChannelState -> (Maybe Integer, Maybe Integer)
+channelSortKey chans this =
   let
     parentKey = _channelParentId' this
     parentChannel = find ((==parentKey) . Just . _channelId') chans
@@ -656,7 +632,7 @@ channelView
   -> Dynamic t (Map.Map Text UserId)
   -> VtyWidget t m (Event t Text)
 channelView chanState users = mdo
-  (progressB, userSend) <- splitV
+  (_, userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
     (scrollableTextWindowed
