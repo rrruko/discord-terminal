@@ -582,7 +582,7 @@ serverList
   -> Dynamic t (Map.Map GuildId GuildState)
   -> VtyWidget t m (Event t GuildId)
 serverList selected guilds = do
-  e <-networkView $
+  e <- networkView $
     ffor2 selected guilds \s g ->
       optionList s g Orientation_Row const \gId guild ->
         stretch do
