@@ -6,7 +6,6 @@
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell #-}
 
 module Editor
   ( editor
@@ -55,7 +54,7 @@ editor
   => Dynamic t (M.Map T.Text UserId)
   -> VtyWidget t m (Event t T.Text)
 editor users = mdo
-    let network = ffor editorState (\es -> editorNetwork es users)
+    let network = ffor editorState (`editorNetwork` users)
     editorUpdate <- switchHold never =<< networkView network
     editorState <- foldDyn updateEditor initialEditorState editorUpdate
     pure (fforMaybe editorUpdate
@@ -117,7 +116,7 @@ userNameChoices prefix names =
         nameList = M.keys n
         choices = filter (p `T.isPrefixOf`) nameList
       in
-        (T.intercalate ", " choices))
+        T.intercalate ", " choices)
 
 editWidget
   :: forall t m. EditorConstraints t m
