@@ -165,11 +165,10 @@ runAppWithHandle
 runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent = mdo
   (newGuildId, newChannelId) <-
     serverWidget
-      handle
       currentGuildId
       currentChanId
       updatedAppState
-      sendUserMessage
+      (sendUserMessage handle)
   let newChanId = updated (liftA2 (,) currentGuildId currentChanId)
   updatedAppState <- updateAppState handle newChanId guilds discordEvent
   (currentGuildId, currentChanId) <-
@@ -470,13 +469,12 @@ data ServerViewState t = ServerViewState
 
 serverWidget
   :: (MonadVtyApp t m, MonadNodeId m)
-  => DiscordHandle
-  -> Dynamic t GuildId
+  => Dynamic t GuildId
   -> Dynamic t ChannelId
   -> Dynamic t AppState
-  -> (DiscordHandle -> ChannelId -> Text -> Performable (VtyWidget t m) (Maybe RestCallErrorCode))
+  -> (ChannelId -> Text -> Performable (VtyWidget t m) x)
   -> VtyWidget t m (Event t GuildId, Event t ChannelId)
-serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
+serverWidget currentGuildId currentChanId guilds sendUserMessage = mdo
   (newGuildId, (userSend, newChanId)) <-
     serversView $ ServerViewState
       currentGuildId
@@ -493,7 +491,7 @@ serverWidget handle currentGuildId currentChanId guilds sendUserMessage = mdo
           currentGuildId
           currentChanId
   let sendEv =
-        sendUserMessage handle
+        sendUserMessage
           <$> current currentChanId
           <@> userSend
   performEvent sendEv
