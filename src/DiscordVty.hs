@@ -526,11 +526,11 @@ serverView sws = do
           (_serverViewGuild sws))))
 
 guildUsers :: Reflex t => Dynamic t GuildState -> Dynamic t (Map.Map Text UserId)
-guildUsers =
-  fmap
-    (Map.map (userId . memberUser)
-      . (\uToM -> Map.mapKeys (\uId -> userName (memberUser (uToM Map.! uId))) uToM)
-      . _members)
+guildUsers = fmap (Map.foldrWithKey nameToId mempty . _members)
+  where
+  nameToId _ member =
+    let user = memberUser member
+    in  Map.insert (userName user) (userId user)
 
 accumulateGuildChannel
   :: (Reflex t, MonadHold t m, MonadFix m)
