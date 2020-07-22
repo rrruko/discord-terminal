@@ -571,10 +571,12 @@ getChannelState s gId cId = do
   currGuild <- s !? gId
   DiscordVty._channels currGuild !? cId
 
-normal = V.defAttr
-highlighted = V.withStyle V.defAttr V.standout
+highlight :: Reflex t => Dynamic t Bool -> RichTextConfig t
 highlight isFocused =
   RichTextConfig (current isFocused <&> bool normal highlighted)
+  where
+    normal = V.defAttr
+    highlighted = V.withStyle V.defAttr V.standout
 
 serverList
   :: forall t m. (MonadVtyApp t m, MonadNodeId m)
