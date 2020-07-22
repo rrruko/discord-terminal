@@ -474,7 +474,14 @@ serverWidget
   -> Dynamic t AppState
   -> (ChannelId -> Text -> Performable (VtyWidget t m) x)
   -> VtyWidget t m (Event t GuildId, Event t ChannelId)
-serverWidget currentGuildId currentChanId guilds sendUserMessage = mdo
+serverWidget currentGuildId currentChanId guilds sendUserMessage = do
+  let currentGuild = ffor2 (fmap _guildsMap guilds) currentGuildId (Map.!)
+  let chanState =
+        liftA3 getChannelState
+          (fmap _guildsMap guilds)
+          currentGuildId
+          currentChanId
+  let users = guildUsers <$> currentGuild
   (newGuildId, (userSend, newChanId)) <-
     serversView $ ServerViewState
       currentGuildId
@@ -483,13 +490,6 @@ serverWidget currentGuildId currentChanId guilds sendUserMessage = mdo
       chanState
       users
       guilds
-  let users = guildUsers currentGuild
-  let currentGuild = ffor2 (fmap _guildsMap guilds) currentGuildId (Map.!)
-  let chanState =
-        liftA3 getChannelState
-          (fmap _guildsMap guilds)
-          currentGuildId
-          currentChanId
   let sendEv =
         sendUserMessage
           <$> current currentChanId
@@ -529,8 +529,8 @@ serverView sws = do
         (fmap DiscordVty._channels
           (_serverViewGuild sws))))
 
-guildUsers :: Reflex t => Dynamic t GuildState -> Dynamic t (Map.Map Text UserId)
-guildUsers = fmap (Map.foldrWithKey nameToId mempty . _members)
+guildUsers :: GuildState -> Map.Map Text UserId
+guildUsers = Map.foldrWithKey nameToId mempty . _members
   where
   nameToId _ member =
     let user = memberUser member
