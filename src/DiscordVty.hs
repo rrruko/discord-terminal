@@ -349,7 +349,8 @@ handleOnStartEvent handle callback = liftIO $ do
       callback (DiscordGuildsEvent (AppState m))
 
 toChannelMap :: [Channel] -> Map.Map ChannelId ChannelState
-toChannelMap chans = Map.fromList [ (channelId c, initChan c) | c <- chans ]
+toChannelMap chans =
+  Map.fromList (fmap (\c -> (channelId c, initChan c)) chans)
   where
   initChan c =
     ChannelState
@@ -368,19 +369,22 @@ toChannelMap chans = Map.fromList [ (channelId c, initChan c) | c <- chans ]
     ChannelDirectMessage {} -> Nothing
     ChannelGroupDM {} -> Nothing
 
-getGuildsMap :: DiscordHandle -> [PartialGuild] -> IO (Map.Map GuildId GuildState)
+getGuildsMap
+  :: DiscordHandle
+  -> [PartialGuild]
+  -> IO (Map.Map GuildId GuildState)
 getGuildsMap handle guilds = do
   chans <- forM guilds \g ->
     restCall handle (R.GetGuildChannels (partialGuildId g)) >>= \case
       Left errCode -> pure (partialGuildId g, [])
       Right chans -> pure (partialGuildId g, chans)
-  let
-    channelMap = fmap toChannelMap (Map.fromList chans)
-  pure
-    (Map.fromList
-      [ (partialGuildId g, GuildState (partialGuildName g) (channelMap Map.! partialGuildId g) mempty)
-      | g <- guilds ])
+  let channelMap = fmap toChannelMap (Map.fromList chans)
+  pure (Map.fromList (guildStates channelMap guilds))
   where
+  toGuildState channels g =
+    GuildState (partialGuildName g) (channels Map.! partialGuildId g) mempty
+  guildStates channels guilds =
+    fmap (\g -> (partialGuildId g, toGuildState channels g)) guilds
   isValidChannel = \case
     ChannelText {} -> True
     ChannelNews {} -> True
