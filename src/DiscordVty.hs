@@ -380,15 +380,12 @@ getGuildsMap
 getGuildsMap handle guilds = do
   chans <- forM guilds \g ->
     restCall handle (R.GetGuildChannels (partialGuildId g)) >>= \case
-      Left errCode -> pure (partialGuildId g, [])
-      Right chans -> pure (partialGuildId g, chans)
-  let channelMap = fmap toChannelMap (Map.fromList chans)
-  pure (Map.fromList (guildStates channelMap guilds))
+      Left errCode -> pure (partialGuildId g, (partialGuildName g, []))
+      Right chans -> pure (partialGuildId g, (partialGuildName g, chans))
+  let channelMaps = fmap (fmap toChannelMap) (Map.fromList chans)
+  pure (fmap toGuildState channelMaps)
   where
-  toGuildState channels g =
-    GuildState (partialGuildName g) (channels Map.! partialGuildId g) mempty
-  guildStates channels guilds =
-    fmap (\g -> (partialGuildId g, toGuildState channels g)) guilds
+  toGuildState (name, chans) = GuildState name chans mempty
   isValidChannel = \case
     ChannelText {} -> True
     ChannelNews {} -> True
