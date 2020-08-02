@@ -25,6 +25,7 @@ library
                      , containers
                      , discord-haskell
                      , lens
+                     , MemoTrie
                      , mtl
                      , reflex
                      , reflex-vty >= 0.1.4.0
@@ -53,6 +54,7 @@ test-suite discord-terminal-test
                      , discord-haskell
                      , discord-terminal
                      , lens
+                     , MemoTrie
                      , mtl
                      , reflex
                      , reflex-vty >= 0.1.4.0

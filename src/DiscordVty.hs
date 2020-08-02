@@ -43,7 +43,7 @@ import Reflex.Vty
 import System.Environment
 
 import Editor (editor)
-import Scrollable (ScrollableTextWindowed(..), scrollableTextWindowed)
+import Scrollable (ScrollableTextWindowed(..))
 
 type DiscordEvent = Discord.Types.Event
 
@@ -732,7 +732,7 @@ optionList selected m orientation sortKey pretty = do
       (forM (sortOn (uncurry sortKey) (Map.toList m')) (uncurry pretty))
 
 channelView
-  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
+  :: forall t m. (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
   => Dynamic t (Maybe ChannelState)
   -> Dynamic t (Map.Map Text UserId)
   -> VtyWidget t m (Event t Text, Event t ())
@@ -740,23 +740,31 @@ channelView chanState users = mdo
   (windowedText, userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
-    (scrollableTextWindowed
+    (scrollableWidgets
       never
-      (csToLines <$> chanState))
+      (csToWidgets <$> chanState))
     (editor users)
   pure (userSend, scrollableTextWindowed_bumpTop windowedText)
   where
-    csToLines :: Maybe ChannelState -> [Text]
-    csToLines (Just m) =
+    csToWidgets :: Maybe ChannelState -> [VtyWidget t m ()]
+    csToWidgets (Just m) =
       case _messages m of
         Loaded m' -> fmap prettyMessage m'
-        NotLoaded -> ["Not loaded"]
-    csToLines Nothing = ["Failed to get channel state"]
-    prettyMessage :: AppMessage -> Text
-    prettyMessage msg =
+        NotLoaded -> [text "Not loaded"]
+    csToWidgets Nothing = [text "Failed to get channel state"]
+    prettyMessage :: AppMessage -> VtyWidget t m ()
+    prettyMessage msg = text $ pure $
       T.pack (show (_timestamp msg)) <>
       "\n" <>
       _author msg <>
       ": " <>
       _contents msg <>
       "\n"
+
+scrollableWidgets
+  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
+  => Event t Int
+  -> Dynamic t [VtyWidget t m a]
+  -> VtyWidget t m (ScrollableTextWindowed t)
+scrollableWidgets _ widgets =
+  pure undefined
