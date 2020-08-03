@@ -6,9 +6,11 @@
 
 module Scrollable
   ( ScrollableTextWindowed(..)
+  , scrollableLayout
   , scrollableTextWindowed
   ) where
 
+import Control.Monad.Trans.Class
 import Control.Monad.Fix
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -23,6 +25,63 @@ data ScrollableTextWindowed t = ScrollableTextWindowed
   , scrollableTextWindowed_bumpTop :: Event t ()
     -- ^ Fires when the user tries to scroll past the top of the window
   }
+
+-- Remove up to n lines from the top of an image
+cutTop :: Int -> V.Image -> V.Image
+cutTop n im = V.cropTop (max 0 $ V.imageHeight im - n) im
+
+runVtyWidget' :: (Reflex t, MonadNodeId m) => Dynamic t Int -> Dynamic t Int -> VtyWidget t m a -> m (a, Behavior t [V.Image])
+runVtyWidget' dw dh w =
+  runVtyWidget
+    (VtyWidgetCtx
+      { _vtyWidgetCtx_width = dw
+      , _vtyWidgetCtx_height = dh
+      , _vtyWidgetCtx_focus = constDyn False
+      , _vtyWidgetCtx_input = never
+      })
+    w
+
+truncateTop :: forall t m a. (Reflex t, Monad m, MonadNodeId m) => Int -> VtyWidget t m a -> VtyWidget t m a
+truncateTop n w = do
+  dw <- displayWidth
+  dh <- displayHeight
+  (result, imageB) <- lift (runVtyWidget' dw dh w)
+  tellImages (fmap (fmap (cutTop n)) imageB)
+  pure result
+
+scrollableLayout
+  :: forall t m a. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m, PostBuild t m)
+  => Event t Int
+  -> Layout t m a
+  -> VtyWidget t m (a, Dynamic t ())
+scrollableLayout scrollBy layout = do
+  let w = runLayout (constDyn Orientation_Column) 0 never layout
+  dw <- displayWidth
+  dh <- displayHeight
+  ((a, sz), imgs) <- lift $ runVtyWidget' dw dh w
+  kup <- key V.KUp
+  kdown <- key V.KDown
+  m <- mouseScroll
+  let requestedScroll :: Event t Int
+      requestedScroll = leftmost
+        [ 1 <$ kdown
+        , (-1) <$ kup
+        , ffor m $ \case
+            ScrollDirection_Up -> (-1)
+            ScrollDirection_Down -> 1
+        , scrollBy
+        ]
+      updateLine maxN delta ix h = max 0 (min (maxN - h) (ix + delta))
+  lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
+    attachPromptlyDyn dh $ attachPromptlyDyn sz requestedScroll
+  bumpTop <-
+    foldDynMaybe
+      (\(ix, reqScroll) _ -> if ix == 0 && reqScroll < 0 then Just () else Nothing)
+      ()
+      (attach (current lineIndex) requestedScroll)
+  tellImages $ ffor2 (current lineIndex) imgs $ \li is -> fmap (cutTop li) is
+  display (current sz)
+  pure (a, bumpTop)
 
 scrollableTextWindowed
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)

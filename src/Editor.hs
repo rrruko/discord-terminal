@@ -93,7 +93,7 @@ mentionWidget users = do
   submitMention <- key V.KEnter
   quit <- keyCombo (V.KChar 'a', [V.MCtrl])
   rec
-    textInp <- runLayout (constDyn Orientation_Column) 1 never $ do
+    (textInp, _) <- runLayout (constDyn Orientation_Column) 1 never $ do
       fixed 1 (userNameChoices (_textInput_value textInp) users)
       fixed 1 (textInput def)
   let
@@ -130,7 +130,7 @@ editWidget
 editWidget initValue = do
   submitPost <- key V.KEnter
   mention <- fmap (Mention <$) (keyCombo (V.KChar 'a', [V.MCtrl]))
-  textInp <- runLayout (constDyn Orientation_Column) 1 never $ do
+  (textInp, _) <- runLayout (constDyn Orientation_Column) 1 never $ do
     fixed 1 blank
     fixed 1 (textInput' def
       { _textInputConfig_initialValue = fromText initValue

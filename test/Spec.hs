@@ -50,29 +50,6 @@ defaultCtx = VtyWidgetCtx
   (constDyn True)
   never
 
-truncateTop :: forall t m a. (Reflex t, Monad m, MonadNodeId m) => Int -> VtyWidget t m a -> VtyWidget t m a
-truncateTop n w = do
-  dw <- displayWidth
-  dh <- displayHeight
-  (result, imageB) <- lift (runVtyWidget' dw dh w)
-  tellImages (fmap (fmap (cutTop n)) imageB)
-  pure result
-
--- Remove up to n lines from the top of an image
-cutTop :: Int -> V.Image -> V.Image
-cutTop n im = V.cropTop (max 0 $ V.imageHeight im - n) im
-
-runVtyWidget' :: (Reflex t, MonadNodeId m) => Dynamic t Int -> Dynamic t Int -> VtyWidget t m a -> m (a, Behavior t [V.Image])
-runVtyWidget' dw dh w =
-  runVtyWidget
-    (VtyWidgetCtx
-      { _vtyWidgetCtx_width = dw
-      , _vtyWidgetCtx_height = dh
-      , _vtyWidgetCtx_focus = constDyn False
-      , _vtyWidgetCtx_input = never
-      })
-    w
-
 type PureVtyWidget a = VtyWidget (Pure Int) (StateT Integer ((->) Int)) a
 
 spec :: SpecWith ()

@@ -25,6 +25,7 @@ import Control.Monad.Reader
 import Data.Bool
 import Data.Foldable
 import Data.List (elemIndex, find, sortOn)
+import qualified Data.List as L
 import Data.Map.Strict ((!?))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -43,7 +44,7 @@ import Reflex.Vty
 import System.Environment
 
 import Editor (editor)
-import Scrollable (ScrollableTextWindowed(..))
+import Scrollable
 
 type DiscordEvent = Discord.Types.Event
 
@@ -717,7 +718,7 @@ optionList selected m orientation sortKey pretty = do
   up <- keys [V.KUp, V.KChar 'k']
   down <- keys [V.KDown, V.KChar 'j']
   let selIndex = elemIndex selected (fmap fst (sortOn (uncurry sortKey) (Map.toList m)))
-  catMaybes <$> runLayout
+  catMaybes . fst <$> runLayout
     (constDyn orientation)
     (fromMaybe 0 selIndex)
     (leftmost
@@ -731,40 +732,61 @@ optionList selected m orientation sortKey pretty = do
       (updated . fmap getFirst . mconcat)
       (forM (sortOn (uncurry sortKey) (Map.toList m')) (uncurry pretty))
 
+type TextSpan = (Text, V.Attr)
+
+richText'
+  :: (Reflex t, Monad m)
+  => Behavior t [(Text, V.Attr)]
+  -> VtyWidget t m ()
+richText' t = do
+  dw <- displayWidth
+  let img = ffor2 (current dw) t $ \w t' ->
+        [V.vertCat $ reverse $ fmap makeImage (foldl' (flip (mergeImage w)) [] t')]
+  tellImages img
+  where
+    makeImage :: ([TextSpan], Int) -> V.Image
+    makeImage (spans, _) =
+      V.horizCat
+        $ fmap (\(t', cfg) -> V.string cfg (T.unpack t'))
+        $ reverse spans
+    mergeImage :: Int -> (Text, V.Attr) -> [([TextSpan], Int)] -> [([TextSpan], Int)]
+    mergeImage w (word, cfg) = \case
+      (spans, sz):xs
+        | T.length word + sz <= w -> ((word, cfg):spans, sz + T.length word):xs
+      xss -> ([(word, cfg)], T.length word):xss
+
+text'
+  :: (Reflex t, Monad m)
+  => Behavior t Text
+  -> VtyWidget t m ()
+text' = richText' . fmap (\t -> [(t, V.defAttr)])
+
 channelView
   :: forall t m. (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
   => Dynamic t (Maybe ChannelState)
   -> Dynamic t (Map.Map Text UserId)
   -> VtyWidget t m (Event t Text, Event t ())
 channelView chanState users = mdo
-  (windowedText, userSend) <- splitV
+  ((_, bumpTop), userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
-    (scrollableWidgets
+    (Scrollable.scrollableLayout
       never
-      (csToWidgets <$> chanState))
+      (networkView $ fmap csToLayout chanState))
     (editor users)
-  pure (userSend, scrollableTextWindowed_bumpTop windowedText)
+  pure (userSend, updated bumpTop)
   where
-    csToWidgets :: Maybe ChannelState -> [VtyWidget t m ()]
-    csToWidgets (Just m) =
+    csToLayout :: Maybe ChannelState -> Layout t m ()
+    csToLayout (Just m) =
       case _messages m of
-        Loaded m' -> fmap prettyMessage m'
-        NotLoaded -> [text "Not loaded"]
-    csToWidgets Nothing = [text "Failed to get channel state"]
-    prettyMessage :: AppMessage -> VtyWidget t m ()
-    prettyMessage msg = text $ pure $
-      T.pack (show (_timestamp msg)) <>
-      "\n" <>
-      _author msg <>
-      ": " <>
-      _contents msg <>
-      "\n"
-
-scrollableWidgets
-  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
-  => Event t Int
-  -> Dynamic t [VtyWidget t m a]
-  -> VtyWidget t m (ScrollableTextWindowed t)
-scrollableWidgets _ widgets =
-  pure undefined
+        Loaded m' -> traverse_ prettyMessage m'
+        NotLoaded -> fixed 1 $ text "Not loaded"
+    csToLayout Nothing = fixed 1 $ text "Failed to get channel state"
+    prettyMessage :: AppMessage -> Layout t m ()
+    prettyMessage msg = do
+      fixed 1 $ text (pure (T.pack (show (_timestamp msg))))
+      fixed 4 $ do
+        richText' $ pure
+          ((_author msg, V.withForeColor V.defAttr V.red)
+            : fmap (,V.defAttr) (fmap (<>(" ")) $ T.words $ _contents msg))
+        pure ()

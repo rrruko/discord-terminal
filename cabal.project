@@ -1,4 +1,4 @@
-packages: .
+packages: . ../reflex-vty
 
 source-repository-package
   type: git

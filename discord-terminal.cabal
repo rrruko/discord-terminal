@@ -31,6 +31,7 @@ library
                      , reflex-vty >= 0.1.4.0
                      , vty
                      , text
+                     , transformers
                      , witherable
   hs-source-dirs:      src
   default-language:    Haskell2010
@@ -60,6 +61,7 @@ test-suite discord-terminal-test
                      , reflex-vty >= 0.1.4.0
                      , vty
                      , text
+                     , transformers
                      , witherable
   hs-source-dirs:      test
   main-is:             Spec.hs
