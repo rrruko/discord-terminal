@@ -396,19 +396,7 @@ toAppMessage msg =
     (messageId msg)
 
 prettyMessageText :: Message -> Text
-prettyMessageText msg =
-  let
-    attachments = fmap attachmentUrl (messageAttachments msg)
-    embeds = fmapMaybe embedUrl (messageEmbeds msg)
-  in
-    fold
-      [ messageText msg
-      , "\n"
-      , if not (null attachments) then "Attachments:\n" else ""
-      , T.unlines attachments
-      , if not (null embeds) then "Embeds:\n" else ""
-      , T.unlines embeds
-      ]
+prettyMessageText msg = messageText msg
 
 data NewMessage = NewMessage
   { newMessageContent :: AppMessage
@@ -735,14 +723,18 @@ optionList selected m orientation sortKey pretty = do
 type TextSpan = (Text, V.Attr)
 
 richText'
-  :: (Reflex t, Monad m)
-  => Behavior t [(Text, V.Attr)]
-  -> VtyWidget t m ()
+  :: (Reflex t, Monad m, MonadFix m, MonadNodeId m)
+  => Dynamic t [(Text, V.Attr)]
+  -> Layout t m ()
 richText' t = do
   dw <- displayWidth
-  let img = ffor2 (current dw) t $ \w t' ->
-        [V.vertCat $ reverse $ fmap makeImage (foldl' (flip (mergeImage w)) [] t')]
-  tellImages img
+  let ls = ffor2 dw t $ \w t' ->
+        reverse $ fmap makeImage (foldl' (flip (mergeImage w)) [] t')
+  let img = fmap ((:[]).V.vertCat) ls
+  rec n <- fixed n $ do
+        tellImages (current img)
+        pure (length <$> ls)
+  pure ()
   where
     makeImage :: ([TextSpan], Int) -> V.Image
     makeImage (spans, _) =
@@ -756,9 +748,9 @@ richText' t = do
       xss -> ([(word, cfg)], T.length word):xss
 
 text'
-  :: (Reflex t, Monad m)
-  => Behavior t Text
-  -> VtyWidget t m ()
+  :: (Reflex t, Monad m, MonadFix m, MonadNodeId m)
+  => Dynamic t Text
+  -> Layout t m ()
 text' = richText' . fmap (\t -> [(t, V.defAttr)])
 
 channelView
@@ -784,9 +776,8 @@ channelView chanState users = mdo
     csToLayout Nothing = fixed 1 $ text "Failed to get channel state"
     prettyMessage :: AppMessage -> Layout t m ()
     prettyMessage msg = do
-      fixed 1 $ text (pure (T.pack (show (_timestamp msg))))
-      fixed 4 $ do
-        richText' $ pure
-          ((_author msg, V.withForeColor V.defAttr V.red)
+      richText' $ constDyn [(T.pack (show (_timestamp msg)), V.withForeColor V.defAttr (V.rgbColor 127 127 127))]
+      richText' $ constDyn $
+          ((_author msg <> ": ", V.withForeColor V.defAttr V.cyan)
             : fmap (,V.defAttr) (fmap (<>(" ")) $ T.words $ _contents msg))
-        pure ()
+      fixed 1 blank
