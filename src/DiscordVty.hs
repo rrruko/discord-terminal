@@ -761,11 +761,11 @@ channelView chanState users = mdo
   (bumpTop, userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
-    (displayWidth >>= Scrollable.scrollableLayout never . img)
+    (displayWidth >>= Scrollable.scrollableLayout (Right () <$ updated chanState) . img)
     (editor users)
   pure (userSend, updated bumpTop)
   where
-    img dw = current $ fmap V.vertCat $ renderMessages dw =<< chanState
+    img dw = fmap V.vertCat $ renderMessages dw =<< chanState
 
 richText''
   :: (Reflex t)

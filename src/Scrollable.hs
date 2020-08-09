@@ -52,8 +52,8 @@ truncateTop n w = do
 
 scrollableLayout
   :: forall t m a. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m, PostBuild t m)
-  => Event t Int
-  -> Behavior t V.Image
+  => Event t (Either Int ())
+  -> Dynamic t V.Image
   -> VtyWidget t m (Dynamic t ())
 scrollableLayout scrollBy img = do
   dw <- displayWidth
@@ -63,25 +63,31 @@ scrollableLayout scrollBy img = do
   kup <- key V.KUp
   kdown <- key V.KDown
   m <- mouseScroll
-  let requestedScroll :: Event t Int
+  let requestedScroll :: Event t (Either Int ())
       requestedScroll = leftmost
-        [ 1 <$ kdown
-        , (-1) <$ kup
+        [ Left 1 <$ kdown
+        , Left (-1) <$ kup
         , ffor m $ \case
-            ScrollDirection_Up -> (-1)
-            ScrollDirection_Down -> 1
+            ScrollDirection_Up -> Left (-1)
+            ScrollDirection_Down -> Left 1
         , scrollBy
         ]
-      updateLine maxN delta ix h = max 0 (min (maxN - h) (ix + delta))
+      updateLine maxN delta ix h =
+        case delta of
+          Left n -> max 0 (min (maxN - h) (ix + n))
+          Right () -> max 0 (maxN - h)
   lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
-    attachPromptlyDyn dh $ attach sz requestedScroll
+    attachPromptlyDyn dh $ attachPromptlyDyn sz requestedScroll
   bumpTop <-
     foldDynMaybe
-      (\(ix, reqScroll) _ -> if ix == 0 && reqScroll < 0 then Just () else Nothing)
+      (\(ix, reqScroll) _ ->
+        if ix == 0 && either (< 0) (const False) reqScroll
+          then Just ()
+          else Nothing)
       ()
       (attach (current lineIndex) requestedScroll)
-  tellImages $ (:[]) <$> ffor2 (current lineIndex) img cutTop
-  display sz
+  tellImages $ current $ (:[]) <$> ffor2 lineIndex img cutTop
+  display (current sz)
   pure bumpTop
 
 scrollableTextWindowed
