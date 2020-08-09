@@ -6,8 +6,10 @@
 
 module Scrollable
   ( ScrollableTextWindowed(..)
-  , scrollableLayout
+  , scrollableImage
+  , scrollableImageWindowed
   , scrollableTextWindowed
+  , truncateTop
   ) where
 
 import Control.Monad.Trans.Class
@@ -26,6 +28,18 @@ data ScrollableTextWindowed t = ScrollableTextWindowed
     -- ^ Fires when the user tries to scroll past the top of the window
   }
 
+truncateTop
+  :: forall t m a. (Reflex t, Monad m, MonadNodeId m)
+  => Int
+  -> VtyWidget t m a
+  -> VtyWidget t m a
+truncateTop n w = do
+  dw <- displayWidth
+  dh <- displayHeight
+  (result, imageB) <- lift (runVtyWidget' dw dh w)
+  tellImages (fmap (fmap (cutTop n)) imageB)
+  pure result
+
 -- Remove up to n lines from the top of an image
 cutTop :: Int -> V.Image -> V.Image
 cutTop n im = V.cropTop (max 0 $ V.imageHeight im - n) im
@@ -41,25 +55,29 @@ runVtyWidget' dw dh w =
       })
     w
 
-truncateTop :: forall t m a. (Reflex t, Monad m, MonadNodeId m) => Int -> VtyWidget t m a -> VtyWidget t m a
-truncateTop n w = do
-  dw <- displayWidth
-  dh <- displayHeight
-  (result, imageB) <- lift (runVtyWidget' dw dh w)
-  tellImages (fmap (fmap (cutTop n)) imageB)
-  pure result
-
-
-scrollableLayout
-  :: forall t m a. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m, PostBuild t m)
+scrollableImageWindowed
+  :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m, PostBuild t m)
   => Event t (Either Int ())
   -> Dynamic t V.Image
   -> VtyWidget t m (Dynamic t ())
-scrollableLayout scrollBy img = do
-  dw <- displayWidth
+scrollableImageWindowed scrollBy img = do
   dh <- displayHeight
-  --((a, sz), imgs) <- lift $ runVtyWidget' dw dh w
-  let sz = V.imageHeight <$> img
+  let size = fmap V.imageHeight img
+  let margin = max <$> (dh - size) <*> 0
+  snd <$> splitV
+    (fmap const margin)
+    (constDyn (False, False))
+    blank
+    (scrollableImage scrollBy img)
+
+scrollableImage
+  :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m, PostBuild t m)
+  => Event t (Either Int ())
+  -> Dynamic t V.Image
+  -> VtyWidget t m (Dynamic t ())
+scrollableImage scrollBy img = do
+  dh <- displayHeight
+  let size = fmap V.imageHeight img
   kup <- key V.KUp
   kdown <- key V.KDown
   m <- mouseScroll
@@ -76,8 +94,9 @@ scrollableLayout scrollBy img = do
         case delta of
           Left n -> max 0 (min (maxN - h) (ix + n))
           Right () -> max 0 (maxN - h)
-  lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
-    attachPromptlyDyn dh $ attachPromptlyDyn sz requestedScroll
+  lineIndex :: Dynamic t Int <-
+    foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
+      attachPromptlyDyn dh $ attachPromptlyDyn size requestedScroll
   bumpTop <-
     foldDynMaybe
       (\(ix, reqScroll) _ ->
@@ -87,7 +106,7 @@ scrollableLayout scrollBy img = do
       ()
       (attach (current lineIndex) requestedScroll)
   tellImages $ current $ (:[]) <$> ffor2 lineIndex img cutTop
-  display (current sz)
+  display (current size)
   pure bumpTop
 
 scrollableTextWindowed

@@ -67,15 +67,15 @@ spec = do
         in  unBehavior imageB
 
     it "doesn't alter images if 0 is passed" $ do
-      getImageB (truncateTop 0 w) 0 `shouldBe` getImageB w 0
+      getImageB (Scrollable.truncateTop 0 w) 0 `shouldBe` getImageB w 0
 
     it "removes the first line when 1 is passed" $ do
-      (getImageB (truncateTop 1 w) 0 !! 0) `shouldBe` V.emptyImage
-      (getImageB (truncateTop 1 w) 0 !! 1) `shouldNotBe` V.emptyImage
-      (getImageB (truncateTop 1 w) 0 !! 2) `shouldNotBe` V.emptyImage
+      (getImageB (Scrollable.truncateTop 1 w) 0 !! 0) `shouldBe` V.emptyImage
+      (getImageB (Scrollable.truncateTop 1 w) 0 !! 1) `shouldNotBe` V.emptyImage
+      (getImageB (Scrollable.truncateTop 1 w) 0 !! 2) `shouldNotBe` V.emptyImage
 
     it "removes everything when 3 is passed" $ do
-      getImageB (truncateTop 3 w) 0 `shouldBe` [V.emptyImage, V.emptyImage, V.emptyImage]
+      getImageB (Scrollable.truncateTop 3 w) 0 `shouldBe` [V.emptyImage, V.emptyImage, V.emptyImage]
 
   describe "scrollableTextWindowed" $ do
     it "stays within bounds" $ do

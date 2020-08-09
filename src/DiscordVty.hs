@@ -159,8 +159,9 @@ runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent
       currentChanId
       updatedAppState
       (sendUserMessage handle)
+      newMessageReceived
   let newChanId = updated (liftA2 (,) currentGuildId currentChanId)
-  updatedAppState <-
+  (updatedAppState, newMessageReceived) <-
     updateAppState
       handle
       currentGuildId
@@ -197,14 +198,14 @@ updateAppState
   -> AppState
   -> Event t NewMessage
   -> Event t (Maybe MessageId)
-  -> VtyWidget t m (Dynamic t AppState)
+  -> VtyWidget t m (Dynamic t AppState, Event t ())
 updateAppState handle currGuildId currChanId newChanId guilds newMsg bumpTop = mdo
   messageUpdates <- getMessageUpdates handle newChanId updatedAppStateDyn newMsg
   oldMessageUpdates <- getOldMessages handle currGuildId currChanId bumpTop
   userUpdates <- getUserUpdates handle newChanId
   updatedAppStateDyn <- foldDyn ($) guilds
     (iterateEvent (mergeList [messageUpdates, userUpdates, oldMessageUpdates]))
-  pure updatedAppStateDyn
+  pure (updatedAppStateDyn, () <$ messageUpdates)
 
 getOldMessages
   :: (MonadVtyApp t m)
@@ -533,8 +534,9 @@ serverWidget
   -> Dynamic t ChannelId
   -> Dynamic t AppState
   -> (ChannelId -> Text -> Performable (VtyWidget t m) x)
+  -> Event t ()
   -> VtyWidget t m (Event t GuildId, Event t ChannelId, Event t (Maybe MessageId))
-serverWidget currentGuildId currentChanId guilds sendMsg = do
+serverWidget currentGuildId currentChanId guilds sendMsg newMsg = do
   let currentGuild = ffor2 (fmap _guildsMap guilds) currentGuildId (Map.!)
   let chanState =
         liftA3 getChannelState
@@ -543,7 +545,7 @@ serverWidget currentGuildId currentChanId guilds sendMsg = do
           currentChanId
   let users = guildUsers <$> currentGuild
   (newGuildId, ((userSend, bumpTop), newChanId)) <-
-    serversView $ ServerViewState
+    serversView newMsg $ ServerViewState
       currentGuildId
       currentChanId
       currentGuild
@@ -575,20 +577,22 @@ getOldestMsg (gs, gId, cId) =
 
 serversView
   :: (MonadVtyApp t m, MonadNodeId m)
-  => ServerViewState t
+  => Event t ()
+  -> ServerViewState t
   -> VtyWidget t m (Event t GuildId, ((Event t T.Text, Event t ()), Event t ChannelId))
-serversView sws = do
+serversView newMsg sws = do
   inp <- key V.KEsc
   tog <- toggle False inp
   splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
     (serverList (_serverViewGId sws) (fmap _guildsMap (_serverViewGuilds sws)))
-    (serverView sws)
+    (serverView newMsg sws)
 
 serverView
   :: (MonadVtyApp t m, MonadNodeId m)
-  => ServerViewState t
+  => Event t ()
+  -> ServerViewState t
   -> VtyWidget t m ((Event t T.Text, Event t ()), Event t ChannelId)
-serverView sws = do
+serverView newMsg sws = do
   nav <- tabNavigation
   navTog <- toggle True nav
   let foc = fmap (bool (False, True) (True, False)) navTog
@@ -597,6 +601,7 @@ serverView sws = do
     foc
     (boxTitle (constant def) " Channel view "
       (channelView
+        newMsg
         (_serverViewChannel sws)
         (_serverViewUsers sws)))
     (boxTitle (constant def) " Channels "
@@ -754,14 +759,15 @@ text' = richText' . fmap (\t -> [(t, V.defAttr)])
 
 channelView
   :: forall t m. (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
-  => Dynamic t (Maybe ChannelState)
+  => Event t ()
+  -> Dynamic t (Maybe ChannelState)
   -> Dynamic t (Map.Map Text UserId)
   -> VtyWidget t m (Event t Text, Event t ())
-channelView chanState users = mdo
+channelView newMsg chanState users = mdo
   (bumpTop, userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
-    (displayWidth >>= Scrollable.scrollableLayout (Right () <$ updated chanState) . img)
+    (displayWidth >>= Scrollable.scrollableImageWindowed (Right () <$ newMsg) . img)
     (editor users)
   pure (userSend, updated bumpTop)
   where
@@ -797,12 +803,8 @@ renderMessages dw = \case
       NotLoaded -> constDyn [V.string V.defAttr "Not loaded"]
 
 renderMessage :: Reflex t => Dynamic t Int -> AppMessage -> Dynamic t V.Image
-renderMessage dw msg = V.pad 0 0 0 0 <$>
-  richText''
-    (pure
-      ( (_author msg <> ": ", V.withForeColor V.defAttr V.cyan)
-      : contentWords
-      ))
-    dw
+renderMessage dw msg = V.pad 0 0 0 0 <$> richText'' (pure content) dw
   where
   contentWords = fmap (, V.defAttr) (fmap (<>(" ")) $ T.words $ _contents msg)
+  content =
+    (_author msg <> ": ", V.withForeColor V.defAttr V.cyan) : contentWords
