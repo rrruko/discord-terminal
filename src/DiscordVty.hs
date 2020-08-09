@@ -43,7 +43,7 @@ import Reflex.Vty
 import System.Environment
 
 import Editor (editor)
-import Scrollable (scrollableTextWindowed)
+import Scrollable
 
 type DiscordEvent = Discord.Types.Event
 
@@ -56,6 +56,7 @@ data AppMessage = AppMessage
   { _author :: Text
   , _contents :: Text
   , _timestamp :: UTCTime
+  , _messageId' :: MessageId
   } deriving (Show)
 makeLenses ''AppMessage
 
@@ -152,14 +153,23 @@ runAppWithHandle
   -> Event t NewMessage
   -> VtyWidget t m ()
 runAppWithHandle (DiscordInit guilds initGuildId initChanId handle) discordEvent = mdo
-  (newGuildId, newChannelId) <-
+  (newGuildId, newChannelId, bumpTop) <-
     serverWidget
       currentGuildId
       currentChanId
       updatedAppState
       (sendUserMessage handle)
+      newMessageReceived
   let newChanId = updated (liftA2 (,) currentGuildId currentChanId)
-  updatedAppState <- updateAppState handle newChanId guilds discordEvent
+  (updatedAppState, newMessageReceived) <-
+    updateAppState
+      handle
+      currentGuildId
+      currentChanId
+      newChanId
+      guilds
+      discordEvent
+      bumpTop
   (currentGuildId, currentChanId) <-
     accumulateGuildChannel
       initGuildId
@@ -182,16 +192,70 @@ sendUserMessage handle cId txt = liftIO $
 updateAppState
   :: (MonadVtyApp t m)
   => DiscordHandle
+  -> Dynamic t GuildId
+  -> Dynamic t ChannelId
   -> Event t (GuildId, ChannelId)
   -> AppState
   -> Event t NewMessage
-  -> VtyWidget t m (Dynamic t AppState)
-updateAppState handle newChanId guilds newMsg = mdo
+  -> Event t (Maybe MessageId)
+  -> VtyWidget t m (Dynamic t AppState, Event t ())
+updateAppState handle currGuildId currChanId newChanId guilds newMsg bumpTop = mdo
   messageUpdates <- getMessageUpdates handle newChanId updatedAppStateDyn newMsg
+  oldMessageUpdates <- getOldMessages handle currGuildId currChanId bumpTop
   userUpdates <- getUserUpdates handle newChanId
   updatedAppStateDyn <- foldDyn ($) guilds
-    (iterateEvent (mergeList [messageUpdates, userUpdates]))
-  pure updatedAppStateDyn
+    (iterateEvent (mergeList [messageUpdates, userUpdates, oldMessageUpdates]))
+  pure (updatedAppStateDyn, () <$ messageUpdates)
+
+getOldMessages
+  :: (MonadVtyApp t m)
+  => DiscordHandle
+  -> Dynamic t GuildId
+  -> Dynamic t ChannelId
+  -> Event t (Maybe MessageId)
+  -> VtyWidget t m (Event t (AppState -> AppState))
+getOldMessages handle currGuildId currChanId req = do
+  req' <- debounce 0.5 req
+  let reqOldChannelMessages =
+        attach (current currGuildId) (attach (current currChanId) req')
+  newMessages <- performEventAsync
+    (fmap
+      ((\f (g,(c,m)) -> f g c m) (requestOldChannelMessages handle))
+      reqOldChannelMessages)
+  pure $ prependMessages <$> newMessages
+
+requestOldChannelMessages
+  :: MonadIO m
+  => DiscordHandle
+  -> GuildId
+  -> ChannelId
+  -> Maybe MessageId
+  -> ((GuildId, ChannelId, [AppMessage]) -> IO ())
+  -> m ()
+requestOldChannelMessages handle gId cId mId callback = liftIO do
+  restCall handle (R.GetChannelMessages cId (10, maybe R.LatestMessages R.BeforeMessage mId)) >>= \case
+    Left _ -> pure ()
+    Right msgs -> do
+      let msgs' = fmap toAppMessage msgs
+      callback (gId, cId, msgs')
+
+{-
+updateUsers :: GuildId -> [GuildMember] -> AppState -> AppState
+updateUsers gId newMembers appState =
+  appState & guildsMap . ix gId . members %~
+    const (Map.fromList (fmap (\x -> (userId (memberUser x), x)) newMembers))
+
+requestGuildUsers
+  :: MonadIO m
+  => DiscordHandle
+  -> GuildId
+  -> ((GuildId, [GuildMember]) -> IO ())
+  -> m ()
+requestGuildUsers handle gId callback = liftIO do
+  restCall handle (R.ListGuildMembers gId (R.GuildMembersTiming (Just 100) Nothing)) >>= \case
+    Left _ -> pure ()
+    Right users -> callback (gId, users)
+-}
 
 getMessageUpdates
   :: (MonadVtyApp t m)
@@ -287,7 +351,13 @@ updateMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
 updateMessages (gId, cId, msg) appState =
   appState & guildsMap . ix gId . channels . ix cId . messages %~ \case
     NotLoaded -> Loaded (reverse msg)
-    Loaded msgs -> Loaded (msgs <> msg)
+    Loaded msgs -> Loaded (msgs <> reverse msg)
+
+prependMessages :: (GuildId, ChannelId, [AppMessage]) -> AppState -> AppState
+prependMessages (gId, cId, msg) appState =
+  appState & guildsMap . ix gId . channels . ix cId . messages %~ \case
+    NotLoaded -> Loaded (reverse msg)
+    Loaded msgs -> Loaded (reverse msg <> msgs)
 
 lookupChannelGuild :: ChannelId -> AppState -> Maybe GuildId
 lookupChannelGuild cId guilds = do
@@ -323,21 +393,10 @@ toAppMessage msg =
     (userName (messageAuthor msg))
     (prettyMessageText msg)
     (messageTimestamp msg)
+    (messageId msg)
 
 prettyMessageText :: Message -> Text
-prettyMessageText msg =
-  let
-    attachments = fmap attachmentUrl (messageAttachments msg)
-    embeds = fmapMaybe embedUrl (messageEmbeds msg)
-  in
-    fold
-      [ messageText msg
-      , "\n"
-      , if not (null attachments) then "Attachments:\n" else ""
-      , T.unlines attachments
-      , if not (null embeds) then "Embeds:\n" else ""
-      , T.unlines embeds
-      ]
+prettyMessageText msg = messageText msg
 
 data NewMessage = NewMessage
   { newMessageContent :: AppMessage
@@ -475,8 +534,9 @@ serverWidget
   -> Dynamic t ChannelId
   -> Dynamic t AppState
   -> (ChannelId -> Text -> Performable (VtyWidget t m) x)
-  -> VtyWidget t m (Event t GuildId, Event t ChannelId)
-serverWidget currentGuildId currentChanId guilds sendMsg = do
+  -> Event t ()
+  -> VtyWidget t m (Event t GuildId, Event t ChannelId, Event t (Maybe MessageId))
+serverWidget currentGuildId currentChanId guilds sendMsg newMsg = do
   let currentGuild = ffor2 (fmap _guildsMap guilds) currentGuildId (Map.!)
   let chanState =
         liftA3 getChannelState
@@ -484,8 +544,8 @@ serverWidget currentGuildId currentChanId guilds sendMsg = do
           currentGuildId
           currentChanId
   let users = guildUsers <$> currentGuild
-  (newGuildId, (userSend, newChanId)) <-
-    serversView $ ServerViewState
+  (newGuildId, ((userSend, bumpTop), newChanId)) <-
+    serversView newMsg $ ServerViewState
       currentGuildId
       currentChanId
       currentGuild
@@ -497,24 +557,42 @@ serverWidget currentGuildId currentChanId guilds sendMsg = do
           <$> current currentChanId
           <@> userSend
   void (performEvent sendEv)
-  pure (newGuildId, newChanId)
+  let oldestMsg =
+        getOldestMsg <$>
+          tag
+            (liftA3 (,,)
+              (current guilds)
+              (current currentGuildId)
+              (current currentChanId))
+            bumpTop
+  pure (newGuildId, newChanId, oldestMsg)
+
+getOldestMsg :: (AppState, GuildId, ChannelId) -> Maybe MessageId
+getOldestMsg (gs, gId, cId) =
+  let msgs = gs ^? guildsMap . ix gId . channels . ix cId . messages
+  in
+    case msgs of
+      Just (Loaded (x:_)) -> Just (_messageId' x)
+      _ -> Nothing
 
 serversView
   :: (MonadVtyApp t m, MonadNodeId m)
-  => ServerViewState t
-  -> VtyWidget t m (Event t GuildId, (Event t T.Text, Event t ChannelId))
-serversView sws = do
+  => Event t ()
+  -> ServerViewState t
+  -> VtyWidget t m (Event t GuildId, ((Event t T.Text, Event t ()), Event t ChannelId))
+serversView newMsg sws = do
   inp <- key V.KEsc
   tog <- toggle False inp
   splitV (pure (const 1)) (tog <&> bool (True, False) (False, True))
     (serverList (_serverViewGId sws) (fmap _guildsMap (_serverViewGuilds sws)))
-    (serverView sws)
+    (serverView newMsg sws)
 
 serverView
   :: (MonadVtyApp t m, MonadNodeId m)
-  => ServerViewState t
-  -> VtyWidget t m (Event t T.Text, Event t ChannelId)
-serverView sws = do
+  => Event t ()
+  -> ServerViewState t
+  -> VtyWidget t m ((Event t T.Text, Event t ()), Event t ChannelId)
+serverView newMsg sws = do
   nav <- tabNavigation
   navTog <- toggle True nav
   let foc = fmap (bool (False, True) (True, False)) navTog
@@ -523,6 +601,7 @@ serverView sws = do
     foc
     (boxTitle (constant def) " Channel view "
       (channelView
+        newMsg
         (_serverViewChannel sws)
         (_serverViewUsers sws)))
     (boxTitle (constant def) " Channels "
@@ -645,32 +724,87 @@ optionList selected m orientation sortKey pretty = do
       (updated . fmap getFirst . mconcat)
       (forM (sortOn (uncurry sortKey) (Map.toList m')) (uncurry pretty))
 
+type TextSpan = (Text, V.Attr)
+
+richText'
+  :: (Reflex t, Monad m, MonadFix m, MonadNodeId m)
+  => Dynamic t [(Text, V.Attr)]
+  -> Layout t m ()
+richText' t = do
+  dw <- displayWidth
+  let ls = ffor2 dw t $ \w t' ->
+        reverse $ fmap makeImage (foldl' (flip (mergeImage w)) [] t')
+  let img = fmap ((:[]).V.vertCat) ls
+  rec n <- fixed n $ do
+        tellImages (current img)
+        pure (length <$> ls)
+  pure ()
+  where
+    makeImage :: ([TextSpan], Int) -> V.Image
+    makeImage (spans, _) =
+      V.horizCat
+        $ fmap (\(t', cfg) -> V.string cfg (T.unpack t'))
+        $ reverse spans
+    mergeImage :: Int -> (Text, V.Attr) -> [([TextSpan], Int)] -> [([TextSpan], Int)]
+    mergeImage w (word, cfg) = \case
+      (spans, sz):xs
+        | T.length word + sz <= w -> ((word, cfg):spans, sz + T.length word):xs
+      xss -> ([(word, cfg)], T.length word):xss
+
+text'
+  :: (Reflex t, Monad m, MonadFix m, MonadNodeId m)
+  => Dynamic t Text
+  -> Layout t m ()
+text' = richText' . fmap (\t -> [(t, V.defAttr)])
+
 channelView
-  :: (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
-  => Dynamic t (Maybe ChannelState)
+  :: forall t m. (Reflex t, MonadHold t m, MonadFix m, MonadNodeId m, NotReady t m, Adjustable t m, PostBuild t m)
+  => Event t ()
+  -> Dynamic t (Maybe ChannelState)
   -> Dynamic t (Map.Map Text UserId)
-  -> VtyWidget t m (Event t Text)
-channelView chanState users = mdo
-  (_, userSend) <- splitV
+  -> VtyWidget t m (Event t Text, Event t ())
+channelView newMsg chanState users = mdo
+  (bumpTop, userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
-    (scrollableTextWindowed
-      never
-      (csToLines <$> chanState))
+    (displayWidth >>= Scrollable.scrollableImageWindowed (Right () <$ newMsg) . img)
     (editor users)
-  pure userSend
+  pure (userSend, updated bumpTop)
   where
-    csToLines :: Maybe ChannelState -> [Text]
-    csToLines (Just m) =
-      case _messages m of
-        Loaded m' -> fmap prettyMessage m'
-        NotLoaded -> ["Not loaded"]
-    csToLines Nothing = ["Failed to get channel state"]
-    prettyMessage :: AppMessage -> Text
-    prettyMessage msg =
-      T.pack (show (_timestamp msg)) <>
-      "\n" <>
-      _author msg <>
-      ": " <>
-      _contents msg <>
-      "\n"
+    img dw = fmap V.vertCat $ renderMessages dw =<< chanState
+
+richText''
+  :: (Reflex t)
+  => Dynamic t [(Text, V.Attr)]
+  -> Dynamic t Int
+  -> Dynamic t V.Image
+richText'' t dw = do
+  let ls = ffor2 dw t $ \w t' ->
+        reverse $ fmap makeImage (foldl' (flip (mergeImage w)) [] t')
+  fmap V.vertCat ls
+  where
+    makeImage :: ([TextSpan], Int) -> V.Image
+    makeImage (spans, _) =
+      V.horizCat
+        $ fmap (\(t', cfg) -> V.string cfg (T.unpack t'))
+        $ reverse spans
+    mergeImage :: Int -> (Text, V.Attr) -> [([TextSpan], Int)] -> [([TextSpan], Int)]
+    mergeImage w (word, cfg) = \case
+      (spans, sz):xs
+        | T.length word + sz <= w -> ((word, cfg):spans, sz + T.length word):xs
+      xss -> ([(word, cfg)], T.length word):xss
+
+renderMessages :: Reflex t => Dynamic t Int -> Maybe ChannelState -> Dynamic t [V.Image]
+renderMessages dw = \case
+  Nothing -> constDyn []
+  Just m ->
+    case _messages m of
+      Loaded m' -> traverse (renderMessage dw) m'
+      NotLoaded -> constDyn [V.string V.defAttr "Not loaded"]
+
+renderMessage :: Reflex t => Dynamic t Int -> AppMessage -> Dynamic t V.Image
+renderMessage dw msg = V.pad 0 0 0 0 <$> richText'' (pure content) dw
+  where
+  contentWords = fmap (, V.defAttr) (fmap (<>(" ")) $ T.words $ _contents msg)
+  content =
+    (_author msg <> ": ", V.withForeColor V.defAttr V.cyan) : contentWords

@@ -74,9 +74,16 @@ editorNetwork
   => EditorState
   -> Dynamic t (M.Map T.Text UserId)
   -> VtyWidget t m (Event t EditorCommand)
-editorNetwork s users = case state s of
-  Mention -> mentionWidget users
-  Edit -> editWidget (content s)
+editorNetwork s users =
+  snd <$> splitH (constDyn (const 2)) (constDyn (False, True)) prompt field
+  where
+  prompt = runLayout (constDyn Orientation_Column) 1 never $ do
+    fixed 1 blank
+    fixed 1 (text "> ")
+  field =
+    case state s of
+      Mention -> mentionWidget users
+      Edit -> editWidget (content s)
 
 mentionWidget
   :: forall t m. EditorConstraints t m
@@ -123,10 +130,11 @@ editWidget
 editWidget initValue = do
   submitPost <- key V.KEnter
   mention <- fmap (Mention <$) (keyCombo (V.KChar 'a', [V.MCtrl]))
-  textInp <-
-    textInput' def
+  textInp <- runLayout (constDyn Orientation_Column) 1 never $ do
+    fixed 1 blank
+    fixed 1 (textInput' def
       { _textInputConfig_initialValue = fromText initValue
-      }
+      })
   pure
     (leftmost
       [ BeginMention <$> tag (current (_textInput_value textInp)) mention

@@ -1,5 +1,9 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Main where
 
@@ -8,6 +12,7 @@ import Test.Hspec
 import qualified DiscordVty
 import qualified Scrollable
 import Data.Bool
+import Data.MemoTrie
 import Control.Monad.Identity
 import Unsafe.Coerce
 import Control.Monad.Fix
@@ -35,6 +40,9 @@ instance (m ~ (->) a, s ~ Integer) => MonadNodeId (StateT s m) where
     modify (+1)
     pure (unsafeCoerce newId)
 
+instance (HasTrie t, Enum t, Ord t) => PostBuild (Pure t) ((->) t) where
+  getPostBuild t = Event (\t' -> if t == t' then Just () else Nothing)
+
 defaultCtx :: (Reflex t) => VtyWidgetCtx t
 defaultCtx = VtyWidgetCtx
   (constDyn 80)
@@ -42,8 +50,33 @@ defaultCtx = VtyWidgetCtx
   (constDyn True)
   never
 
+type PureVtyWidget a = VtyWidget (Pure Int) (StateT Integer ((->) Int)) a
+
 spec :: SpecWith ()
 spec = do
+  describe "truncateTop" $ do
+    let
+      w :: PureVtyWidget ()
+      w = col $ do
+        fixed 1 $ text (pure "A")
+        fixed 1 $ text (pure "BC")
+        fixed 1 $ text (pure "DEF")
+      getImageB :: PureVtyWidget a -> Int -> [V.Image]
+      getImageB widget =
+        let ((_, imageB), _) = runStateT (runVtyWidget defaultCtx widget) 0 0
+        in  unBehavior imageB
+
+    it "doesn't alter images if 0 is passed" $ do
+      getImageB (Scrollable.truncateTop 0 w) 0 `shouldBe` getImageB w 0
+
+    it "removes the first line when 1 is passed" $ do
+      (getImageB (Scrollable.truncateTop 1 w) 0 !! 0) `shouldBe` V.emptyImage
+      (getImageB (Scrollable.truncateTop 1 w) 0 !! 1) `shouldNotBe` V.emptyImage
+      (getImageB (Scrollable.truncateTop 1 w) 0 !! 2) `shouldNotBe` V.emptyImage
+
+    it "removes everything when 3 is passed" $ do
+      getImageB (Scrollable.truncateTop 3 w) 0 `shouldBe` [V.emptyImage, V.emptyImage, V.emptyImage]
+
   describe "scrollableTextWindowed" $ do
     it "stays within bounds" $ do
       let
@@ -57,11 +90,11 @@ spec = do
           runWidgetPure
             (vtyCtx windowHeight)
             (Scrollable.scrollableTextWindowed never widgetContents)
-      unBehavior (widget 3) 0 `shouldBe` (1,3,5)
-      unBehavior (widget 3) 1 `shouldBe` (2,4,5)
-      unBehavior (widget 3) 2 `shouldBe` (3,5,5)
-      unBehavior (widget 3) 100 `shouldBe` (3,5,5)
-      unBehavior (widget 100) 0 `shouldBe` (1,5,5)
+      unBehavior (Scrollable.scrollableTextWindowed_position $ widget 3) 0 `shouldBe` (1,3,5)
+      unBehavior (Scrollable.scrollableTextWindowed_position $ widget 3) 1 `shouldBe` (2,4,5)
+      unBehavior (Scrollable.scrollableTextWindowed_position $ widget 3) 2 `shouldBe` (3,5,5)
+      unBehavior (Scrollable.scrollableTextWindowed_position $ widget 3) 100 `shouldBe` (3,5,5)
+      unBehavior (Scrollable.scrollableTextWindowed_position $ widget 100) 0 `shouldBe` (1,5,5)
 
 main :: IO ()
 main = hspec spec
