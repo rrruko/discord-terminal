@@ -25,7 +25,6 @@ import Control.Monad.Reader
 import Data.Bool
 import Data.Foldable
 import Data.List (elemIndex, find, sortOn)
-import qualified Data.List as L
 import Data.Map.Strict ((!?))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -759,25 +758,51 @@ channelView
   -> Dynamic t (Map.Map Text UserId)
   -> VtyWidget t m (Event t Text, Event t ())
 channelView chanState users = mdo
-  ((_, bumpTop), userSend) <- splitV
+  (bumpTop, userSend) <- splitV
     (pure (subtract 2))
     (pure (False, True))
-    (Scrollable.scrollableLayout
-      never
-      (networkView $ fmap csToLayout chanState))
+    (displayWidth >>= Scrollable.scrollableLayout never . img)
     (editor users)
   pure (userSend, updated bumpTop)
   where
-    csToLayout :: Maybe ChannelState -> Layout t m ()
-    csToLayout (Just m) =
-      case _messages m of
-        Loaded m' -> traverse_ prettyMessage m'
-        NotLoaded -> fixed 1 $ text "Not loaded"
-    csToLayout Nothing = fixed 1 $ text "Failed to get channel state"
-    prettyMessage :: AppMessage -> Layout t m ()
-    prettyMessage msg = do
-      richText' $ constDyn [(T.pack (show (_timestamp msg)), V.withForeColor V.defAttr (V.rgbColor 127 127 127))]
-      richText' $ constDyn $
-          ((_author msg <> ": ", V.withForeColor V.defAttr V.cyan)
-            : fmap (,V.defAttr) (fmap (<>(" ")) $ T.words $ _contents msg))
-      fixed 1 blank
+    img dw = current $ fmap V.vertCat $ renderMessages dw =<< chanState
+
+richText''
+  :: (Reflex t)
+  => Dynamic t [(Text, V.Attr)]
+  -> Dynamic t Int
+  -> Dynamic t V.Image
+richText'' t dw = do
+  let ls = ffor2 dw t $ \w t' ->
+        reverse $ fmap makeImage (foldl' (flip (mergeImage w)) [] t')
+  fmap V.vertCat ls
+  where
+    makeImage :: ([TextSpan], Int) -> V.Image
+    makeImage (spans, _) =
+      V.horizCat
+        $ fmap (\(t', cfg) -> V.string cfg (T.unpack t'))
+        $ reverse spans
+    mergeImage :: Int -> (Text, V.Attr) -> [([TextSpan], Int)] -> [([TextSpan], Int)]
+    mergeImage w (word, cfg) = \case
+      (spans, sz):xs
+        | T.length word + sz <= w -> ((word, cfg):spans, sz + T.length word):xs
+      xss -> ([(word, cfg)], T.length word):xss
+
+renderMessages :: Reflex t => Dynamic t Int -> Maybe ChannelState -> Dynamic t [V.Image]
+renderMessages dw = \case
+  Nothing -> constDyn []
+  Just m ->
+    case _messages m of
+      Loaded m' -> traverse (renderMessage dw) m'
+      NotLoaded -> constDyn [V.string V.defAttr "Not loaded"]
+
+renderMessage :: Reflex t => Dynamic t Int -> AppMessage -> Dynamic t V.Image
+renderMessage dw msg = V.pad 0 0 0 0 <$>
+  richText''
+    (pure
+      ( (_author msg <> ": ", V.withForeColor V.defAttr V.cyan)
+      : contentWords
+      ))
+    dw
+  where
+  contentWords = fmap (, V.defAttr) (fmap (<>(" ")) $ T.words $ _contents msg)

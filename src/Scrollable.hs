@@ -49,16 +49,17 @@ truncateTop n w = do
   tellImages (fmap (fmap (cutTop n)) imageB)
   pure result
 
+
 scrollableLayout
   :: forall t m a. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m, PostBuild t m)
   => Event t Int
-  -> Layout t m a
-  -> VtyWidget t m (a, Dynamic t ())
-scrollableLayout scrollBy layout = do
-  let w = runLayout (constDyn Orientation_Column) 0 never layout
+  -> Behavior t V.Image
+  -> VtyWidget t m (Dynamic t ())
+scrollableLayout scrollBy img = do
   dw <- displayWidth
   dh <- displayHeight
-  ((a, sz), imgs) <- lift $ runVtyWidget' dw dh w
+  --((a, sz), imgs) <- lift $ runVtyWidget' dw dh w
+  let sz = V.imageHeight <$> img
   kup <- key V.KUp
   kdown <- key V.KDown
   m <- mouseScroll
@@ -73,15 +74,15 @@ scrollableLayout scrollBy layout = do
         ]
       updateLine maxN delta ix h = max 0 (min (maxN - h) (ix + delta))
   lineIndex :: Dynamic t Int <- foldDyn (\(h, (maxN, delta)) ix -> updateLine maxN delta ix h) 0 $
-    attachPromptlyDyn dh $ attachPromptlyDyn sz requestedScroll
+    attachPromptlyDyn dh $ attach sz requestedScroll
   bumpTop <-
     foldDynMaybe
       (\(ix, reqScroll) _ -> if ix == 0 && reqScroll < 0 then Just () else Nothing)
       ()
       (attach (current lineIndex) requestedScroll)
-  tellImages $ ffor2 (current lineIndex) imgs $ \li is -> fmap (cutTop li) is
-  display (current sz)
-  pure (a, bumpTop)
+  tellImages $ (:[]) <$> ffor2 (current lineIndex) img cutTop
+  display sz
+  pure bumpTop
 
 scrollableTextWindowed
   :: forall t m. (MonadHold t m, MonadFix m, Reflex t, MonadNodeId m)
