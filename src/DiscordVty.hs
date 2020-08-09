@@ -710,7 +710,7 @@ optionList selected m orientation sortKey pretty = do
   up <- keys [V.KUp, V.KChar 'k']
   down <- keys [V.KDown, V.KChar 'j']
   let selIndex = elemIndex selected (fmap fst (sortOn (uncurry sortKey) (Map.toList m)))
-  catMaybes . fst <$> runLayout
+  catMaybes <$> runLayout
     (constDyn orientation)
     (fromMaybe 0 selIndex)
     (leftmost
